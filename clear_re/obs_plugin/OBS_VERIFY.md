@@ -288,21 +288,27 @@ $env:DPDFNET_MODEL = 'D:\...\plugin\models\dpdfnet8_48khz_hr_2out.onnx'
 - インストール済み DLL の SHA256: `d4d480e502f94b82fc7876d61935f83a07706e8f7a9fd0687910842e7a4095e2`
   （ビルド出力と一致、1,586,176 bytes）
 
-### v0.2.0 + ログ出力（2026-10-18 実施 / 版は v0.2.0 のまま）
+### v0.2.1（2026-10-18 実施）
 
-`run_obs_verify.ps1` をビルド + インストール込みで再実行（専用ログの追加後）:
+専用ログ出力を入れて版を上げ、`run_obs_verify.ps1` をビルド + インストール込みで再実行:
 
-- `%APPDATA%\obs-studio\plugin_config\obs_noise_suppressor\obs_noise_suppressor.log` が
+- ロード: `OBS Noise Suppressor v0.2.1 を読み込みました` →
+  `module loaded (libobs api 0x20020002, obs_source_info 424 bytes, ort api 17)`
+- 状態: `status: 48 kHz / ch=2 / latency 2880 samples / dpdfnet8_48khz_hr_2out.onnx | n_fft=960 hop=480 state=90228 outputs=2`
+- 実機遅延: `2880 samples (6.000 hop, 60.0 ms)` / 相関 `0.8186`
+- 実機 vs オフライン参照: `1260928 frames x 2 ch / max diff = 0e0 / diff rms = 0e0`（**ビット一致**）
+- ログファイル: `%APPDATA%\obs-studio\plugin_config\obs_noise_suppressor\obs_noise_suppressor.log` が
   自動で作られること（`plugin_config` 側にフォルダが無い状態から作成された）。
-  中身は 14 行で、`<時刻> [LEVEL] 本文` がモジュール読み込み → フィルタ生成 →
+  1 セッションは 14 行で、`<時刻> [LEVEL] 本文` がモジュール読み込み → フィルタ生成 →
   ORT 読み込み → `status:` → フィルタ破棄 → モジュール解放まで並ぶ
 - 同じ行が OBS 標準ログにも `[obs-noise-suppressor]` 付きで出ること
-- 実機遅延 `2880 samples (6.000 hop, 60.0 ms)` / 実機 vs オフライン参照が
-  `1248640 frames x 2 ch / max diff = 0e0`（**ビット一致**）で、ログ追加が
-  音声処理に影響していないこと
+- パネルの絵: `ui.rs` を変更していないため v0.2.0 と同一（ライブ取り込みは
+  メーターの針位置・読取値だけが違う）
 - 自動テスト: `cargo test --release --lib` → **54 passed / 0 failed**
   （`obs_log!` → ファイルの経路、世代退避、連続重複の間引き、上限での停止、
   複数行メッセージの整形を含む）
 - ビルド警告: Release / Debug ともに **0 件**
-- インストール済み DLL の SHA256: `a6bf166443166e6e8ae54f4ceb22e36bc98bb5a1b39ff60895236419965ee3ca`
-  （ビルド出力と一致、1,608,192 bytes）
+- インストール済み DLL の SHA256: `0ae254b4949ce12489b2c40a0ba2688c7a9d8d0fa1ea90545c549edd0f9df98d`
+  （ビルド出力・配布 ZIP 内と一致、1,608,192 bytes）
+- 配布 ZIP: `OBS-Noise-Suppressor-0.2.1-win64.zip`（53,420,449 bytes、
+  SHA256 `c9ea75c392e3bee5d2ed2603ee7ce68bfe992177b79b28ffbe145d905ad303e1`）

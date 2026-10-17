@@ -293,15 +293,15 @@ OBS には音声フィルタ用の汎用遅延補正がないため、同じシ�
 実際の中身（このマシンで OBS に音を 25 秒流した例。パネルを開いたときの行は省略）:
 
 ```text
-2026-10-18 04:11:38.739 [INFO] OBS Noise Suppressor v0.2.0 を読み込みました
-2026-10-18 04:11:38.739 [INFO] module loaded (libobs api 0x20020002, obs_source_info 424 bytes, ort api 17)
-2026-10-18 04:11:38.739 [INFO] dll: C:\ProgramData\obs-studio\plugins\obs_noise_suppressor\bin\64bit
-2026-10-18 04:11:38.739 [INFO] log file: C:\Users\<user>\AppData\Roaming\obs-studio/plugin_config/obs_noise_suppressor/obs_noise_suppressor.log
-2026-10-18 04:11:38.880 [INFO] filter created (ambience 0.50, voice 0.00 dB, reverb 0.00)
-2026-10-18 04:11:38.903 [INFO] onnxruntime 1.31.0 (…\plugins\obs_noise_suppressor\data\dpdfnet_onnxruntime.dll) を読み込みました
-2026-10-18 04:11:39.189 [INFO] status: 48 kHz / ch=2 / latency 2880 samples / dpdfnet8_48khz_hr_2out.onnx | n_fft=960 hop=480 state=90228 outputs=2
-2026-10-18 04:12:05.230 [INFO] filter destroyed
-2026-10-18 04:12:05.993 [INFO] module unloaded
+2026-10-18 04:23:09.949 [INFO] OBS Noise Suppressor v0.2.1 を読み込みました
+2026-10-18 04:23:09.949 [INFO] module loaded (libobs api 0x20020002, obs_source_info 424 bytes, ort api 17)
+2026-10-18 04:23:09.949 [INFO] dll: C:\ProgramData\obs-studio\plugins\obs_noise_suppressor\bin\64bit
+2026-10-18 04:23:09.949 [INFO] log file: C:\Users\<user>\AppData\Roaming\obs-studio/plugin_config/obs_noise_suppressor/obs_noise_suppressor.log
+2026-10-18 04:23:10.066 [INFO] filter created (ambience 0.50, voice 0.00 dB, reverb 0.00)
+2026-10-18 04:23:10.085 [INFO] onnxruntime 1.31.0 (…\plugins\obs_noise_suppressor\data\dpdfnet_onnxruntime.dll) を読み込みました
+2026-10-18 04:23:10.365 [INFO] status: 48 kHz / ch=2 / latency 2880 samples / dpdfnet8_48khz_hr_2out.onnx | n_fft=960 hop=480 state=90228 outputs=2
+2026-10-18 04:23:36.659 [INFO] filter destroyed
+2026-10-18 04:23:37.159 [INFO] module unloaded
 ```
 
 | 項目 | 内容 |

@@ -128,7 +128,7 @@ ONNX Runtime とモデルは `vendor/` と `clear_re/plugin/models/` に入っ�
 ## 動作確認済みの環境
 
 - OBS Studio 32.2.2 / Windows x64 / ONNX Runtime 1.31.0（`ORT_API_VERSION = 17`）
-- 実機 vs オフライン参照が**ビット一致**（998,784 frames × 2 ch / 最大差 `0e0`）
+- 実機 vs オフライン参照が**ビット一致**（1,260,928 frames × 2 ch / 最大差 `0e0`）
 - 遅延 `2880 samples (6.000 hop, 60.0 ms)` 固定
 - `cargo test --release --lib` → **54 passed / 0 failed**、ビルド警告 0 件
 
@@ -142,11 +142,11 @@ OBS 標準のログ（`%APPDATA%\obs-studio\logs\*.txt`）にも同じ内容が�
 ```
 
 ```text
-2026-10-18 04:11:38.739 [INFO] OBS Noise Suppressor v0.2.0 を読み込みました
-2026-10-18 04:11:38.739 [INFO] dll: C:\ProgramData\obs-studio\plugins\obs_noise_suppressor\bin\64bit
-2026-10-18 04:11:38.880 [INFO] filter created (ambience 0.50, voice 0.00 dB, reverb 0.00)
-2026-10-18 04:11:39.189 [INFO] status: 48 kHz / ch=2 / latency 2880 samples / dpdfnet8_48khz_hr_2out.onnx
-2026-10-18 04:12:05.230 [INFO] filter destroyed
+2026-10-18 04:23:09.949 [INFO] OBS Noise Suppressor v0.2.1 を読み込みました
+2026-10-18 04:23:09.949 [INFO] dll: C:\ProgramData\obs-studio\plugins\obs_noise_suppressor\bin\64bit
+2026-10-18 04:23:10.066 [INFO] filter created (ambience 0.50, voice 0.00 dB, reverb 0.00)
+2026-10-18 04:23:10.365 [INFO] status: 48 kHz / ch=2 / latency 2880 samples / dpdfnet8_48khz_hr_2out.onnx
+2026-10-18 04:23:36.659 [INFO] filter destroyed
 ```
 
 記録するのは `ERROR` / `WARNING` / `INFO` の 3 段（`LOG_DEBUG` は OBS 標準ログだけ）で、
