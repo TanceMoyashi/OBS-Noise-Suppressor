@@ -32,7 +32,9 @@ use std::ffi::{c_char, CStr};
 use std::os::raw::c_void;
 use std::path::PathBuf;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
+};
 use std::sync::{Arc, Mutex};
 
 use crate::obs_log;
@@ -65,6 +67,10 @@ pub struct Params {
     ambience: AtomicU32,
     voice: AtomicU32,
     voice_reverb: AtomicU32,
+    /// 使うモデル（`paths::ModelChoice::code()`）。エンジンを組み直すかの判定にも使う。
+    model: AtomicU8,
+    /// VU メーターの基準（`dsp::VuRef::code()` = dBFS）。表示にだけ効く。
+    vu_ref: AtomicU8,
 }
 
 impl Params {
@@ -73,6 +79,8 @@ impl Params {
             ambience: AtomicU32::new((dsp::AMBIENCE_DEFAULT as f32).to_bits()),
             voice: AtomicU32::new((dsp::VOICE_DEFAULT as f32).to_bits()),
             voice_reverb: AtomicU32::new((dsp::VOICE_REVERB_DEFAULT as f32).to_bits()),
+            model: AtomicU8::new(paths::ModelChoice::default().code()),
+            vu_ref: AtomicU8::new(dsp::VuRef::default().code()),
         }
     }
 
@@ -104,7 +112,28 @@ impl Params {
         self.voice_reverb.store(v.to_bits(), Ordering::Relaxed);
     }
 
+    /// 使うモデル。
+    pub fn model(&self) -> paths::ModelChoice {
+        paths::ModelChoice::from_code(self.model.load(Ordering::Relaxed))
+    }
+
+    pub fn set_model(&self, m: paths::ModelChoice) {
+        self.model.store(m.code(), Ordering::Relaxed);
+    }
+
+    /// VU メーターの基準（0 VU = 何 dBFS）。
+    pub fn vu_ref(&self) -> dsp::VuRef {
+        dsp::VuRef::from_code(self.vu_ref.load(Ordering::Relaxed))
+    }
+
+    pub fn set_vu_ref(&self, v: dsp::VuRef) {
+        self.vu_ref.store(v.code(), Ordering::Relaxed);
+    }
+
     /// OBS の設定から読み込む（`update` / `create` のみが呼ぶ）。
+    ///
+    /// 文字列の設定は「キーが無いと空文字」が返るので、空 = 既定値として扱う
+    /// （古いシーンコレクションを読んでも既定で動く）。
     pub fn read_settings(&self, settings: *mut crate::ffi::obs_data_t) {
         if settings.is_null() {
             return;
@@ -116,6 +145,18 @@ impl Params {
             self.set_ambience(a);
             self.set_voice(v);
             self.set_voice_reverb(r);
+
+            let m = crate::ffi::obs_data_get_string(settings, dsp::MODEL.as_ptr());
+            if !m.is_null() {
+                let s = CStr::from_ptr(m).to_string_lossy();
+                self.set_model(paths::ModelChoice::from_setting(&s));
+            }
+
+            let vr = crate::ffi::obs_data_get_string(settings, dsp::VU_REF.as_ptr());
+            if !vr.is_null() {
+                let s = CStr::from_ptr(vr).to_string_lossy();
+                self.set_vu_ref(dsp::VuRef::from_setting(&s));
+            }
         }
     }
 }
@@ -214,6 +255,9 @@ pub struct FilterData {
     /// 可能性があるため）。
     engine: AtomicPtr<Engine>,
     engine_channels: AtomicUsize,
+    /// 今のエンジンが使っているモデル（`paths::ModelChoice::code()`）。
+    /// 設定変更で組み直すべきかの判定に使う。
+    engine_model: AtomicU8,
 
     /// 差し替えで引退したエンジン。オーディオスレッドがまだ使っている可能性が
     /// あるので、`destroy` まで保持する。
@@ -246,6 +290,7 @@ impl FilterData {
             shared: Arc::new(Shared::new(Arc::new(Meters::new()))),
             engine: AtomicPtr::new(ptr::null_mut()),
             engine_channels: AtomicUsize::new(0),
+            engine_model: AtomicU8::new(u8::MAX),
             retired: Mutex::new(Vec::new()),
             passthrough_logged: AtomicBool::new(false),
             last_timestamp: AtomicU64::new(0),
@@ -285,9 +330,13 @@ impl FilterData {
         }
 
         let want = (unsafe { crate::ffi::audio_output_get_channels(audio) } as usize).clamp(1, 2);
+        let want_model = self.shared.params.model();
 
         let cur = self.engine.load(Ordering::Acquire);
-        if !cur.is_null() && self.engine_channels.load(Ordering::Relaxed) == want {
+        if !cur.is_null()
+            && self.engine_channels.load(Ordering::Relaxed) == want
+            && self.engine_model.load(Ordering::Relaxed) == want_model.code()
+        {
             return true;
         }
 
@@ -297,7 +346,8 @@ impl FilterData {
             return false;
         }
 
-        let model = paths::env_model_file().or_else(|| paths::find_model(&self.resource_dirs));
+        let model = paths::env_model_file()
+            .or_else(|| paths::find_model_choice(want_model, &self.resource_dirs));
         let Some(model) = model else {
             self.set_status_detail(
                 ST_MODEL_NOT_FOUND,
@@ -327,6 +377,7 @@ impl FilterData {
 
                 let old = self.engine.swap(ptr, Ordering::AcqRel);
                 self.engine_channels.store(want, Ordering::Relaxed);
+                self.engine_model.store(want_model.code(), Ordering::Relaxed);
                 self.shared.dereverb.store(dereverb, Ordering::Relaxed);
                 self.shared.channels.store(want, Ordering::Relaxed);
 
@@ -358,10 +409,11 @@ impl FilterData {
                 // ログとプロパティの説明に出る）。旧 VST3 版の
                 // `48 kHz / model loaded (2 outputs)` に相当する。
                 self.shared.set_summary(format!(
-                    "{want} ch  ·  48 kHz  ·  遅延 {} samples ({:.0} ms)  ·  dereverb {}",
+                    "{want} ch  ·  48 kHz  ·  遅延 {} samples ({:.0} ms)  ·  dereverb {}  ·  model {}",
                     eng_latency,
                     eng_latency as f64 / OBS_SR as f64 * 1000.0,
-                    if dereverb { "あり" } else { "なし" }
+                    if dereverb { "あり" } else { "なし" },
+                    want_model.as_str()
                 ));
                 true
             }
@@ -379,6 +431,7 @@ impl FilterData {
     pub fn drop_engine(&self) {
         let old = self.engine.swap(ptr::null_mut(), Ordering::AcqRel);
         self.engine_channels.store(0, Ordering::Relaxed);
+        self.engine_model.store(u8::MAX, Ordering::Relaxed);
         self.shared.channels.store(0, Ordering::Relaxed);
         if !old.is_null() {
             unsafe { drop(Box::from_raw(old)) };
@@ -527,6 +580,16 @@ pub unsafe extern "C" fn get_defaults(settings: *mut crate::ffi::obs_data_t) {
             dsp::VOICE_REVERB.as_ptr(),
             dsp::VOICE_REVERB_DEFAULT,
         );
+        crate::ffi::obs_data_set_default_string(
+            settings,
+            dsp::MODEL.as_ptr(),
+            dsp::MODEL_DEFAULT.as_ptr(),
+        );
+        crate::ffi::obs_data_set_default_string(
+            settings,
+            dsp::VU_REF.as_ptr(),
+            dsp::VU_REF_DEFAULT.as_ptr(),
+        );
     })
 }
 
@@ -566,6 +629,7 @@ pub unsafe extern "C" fn activate(data: *mut c_void) {
         if std::env::var_os("DPDFNET_OPEN_PANEL_ON_START").is_some()
             && fd.shared.panel.load(Ordering::SeqCst) == 0
         {
+            obs_log!(crate::ffi::LOG_INFO, "パネルを自動で開きます (activate)");
             if let Err(e) = ui::open_panel(&fd.shared, fd.source) {
                 obs_log!(crate::ffi::LOG_WARNING, "パネルを開けません: {e}");
             }
@@ -645,13 +709,69 @@ pub unsafe extern "C" fn get_properties(
             c"残す残響（モデルが 2 出力のときのみ有効）".as_ptr(),
         );
 
-        // 自前 Win32 パネル（フェーダー + メーター）。`data` はこのフィルタの
-        // `FilterData` なので、そのまま `priv` として渡せる。
+        // ---- モデル（ドロップダウン） ----
+        // 同梱しているのは dpdfnet8 と dpdfnet2 の 2 種だけなので選択肢は 3 つ。
+        // 同梱されていない選択肢は disabled にして選べないようにする。
+        let dirs = if data.is_null() {
+            collect_resource_dirs()
+        } else {
+            let fd = &*(data as *const FilterData);
+            fd.resource_dirs.clone()
+        };
+
+        let model_list = crate::ffi::obs_properties_add_list(
+            props,
+            dsp::MODEL.as_ptr(),
+            c"モデル".as_ptr(),
+            crate::ffi::OBS_COMBO_TYPE_LIST,
+            crate::ffi::OBS_COMBO_FORMAT_STRING,
+        );
+        for (idx, (val, label)) in [
+            ("auto", "自動（高品質を優先）"),
+            ("dp8", "高品質 - dpdfnet8"),
+            ("dp2", "軽量 - dpdfnet2"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let v = std::ffi::CString::new(*val).unwrap_or_default();
+            let l = std::ffi::CString::new(*label).unwrap_or_default();
+            crate::ffi::obs_property_list_add_string(model_list, l.as_ptr(), v.as_ptr());
+            if paths::find_model_choice(paths::ModelChoice::from_setting(val), &dirs).is_none() {
+                crate::ffi::obs_property_list_item_disable(model_list, idx, true);
+            }
+        }
+        crate::ffi::obs_property_set_long_description(
+            model_list,
+            c"使う DPDFNet モデル。切り替えるとエンジンを作り直すため数十 ms 音が途切れます。".as_ptr(),
+        );
+
+        // ---- VU メーターの基準 ----
+        let vu_list = crate::ffi::obs_properties_add_list(
+            props,
+            dsp::VU_REF.as_ptr(),
+            c"VU メーター基準".as_ptr(),
+            crate::ffi::OBS_COMBO_TYPE_LIST,
+            crate::ffi::OBS_COMBO_FORMAT_STRING,
+        );
+        for vr in dsp::VuRef::ALL {
+            let v = std::ffi::CString::new(vr.as_str()).unwrap_or_default();
+            let l = std::ffi::CString::new(vr.label()).unwrap_or_default();
+            crate::ffi::obs_property_list_add_string(vu_list, l.as_ptr(), v.as_ptr());
+        }
+        crate::ffi::obs_property_set_long_description(
+            vu_list,
+            c"0 VU が何 dBFS に当たるか。針の目盛り全体（-20 VU 〜 +3 VU）が基準と一緒に動きます。"
+                .as_ptr(),
+        );
+
+        // 自前 Win32 パネル（フェーダー + メーター + メモリー）。`data` はこの
+        // フィルタの `FilterData` なので、そのまま `priv` として渡せる。
         if !data.is_null() {
             crate::ffi::obs_properties_add_button2(
                 props,
                 c"dpdfnet_panel".as_ptr(),
-                c"パネルを開く（ノブ / メーター）".as_ptr(),
+                c"パネルを開く（フェーダー / メーター / メモリー）".as_ptr(),
                 Some(on_open_panel_clicked),
                 data,
             );

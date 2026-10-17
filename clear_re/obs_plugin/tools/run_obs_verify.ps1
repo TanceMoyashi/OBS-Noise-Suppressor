@@ -255,8 +255,15 @@ Remove-Item "$WorkDir\dump_*.wav" -Force -ErrorAction SilentlyContinue
 Remove-Item "$env:APPDATA\obs-studio\.sentinel\run_*" -Force -ErrorAction SilentlyContinue
 
 $env:DPDFNET_DUMP = $dumpPrefix
-if ($NoPanel) { Remove-Item Env:\DPDFNET_OPEN_PANEL_ON_START -ErrorAction SilentlyContinue }
-else { $env:DPDFNET_OPEN_PANEL_ON_START = "1" }
+if ($NoPanel) {
+    Remove-Item Env:\DPDFNET_OPEN_PANEL_ON_START -ErrorAction SilentlyContinue
+    Remove-Item Env:\DPDFNET_PANEL_SNAPSHOT -ErrorAction SilentlyContinue
+} else {
+    $env:DPDFNET_OPEN_PANEL_ON_START = "1"
+    # パネル自身に自分の絵を書かせる（他のウィンドウに隠されていても取れる）。
+    $env:DPDFNET_PANEL_SNAPSHOT = Join-Path $WorkDir "panel_live.bmp"
+    Remove-Item (Join-Path $WorkDir "panel_live.bmp") -Force -ErrorAction SilentlyContinue
+}
 
 $logBefore = (Get-ChildItem "$logDir\*.txt" -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1)
@@ -303,6 +310,23 @@ try {
         Write-Host "スクリーンショット: $shot" -ForegroundColor Green
     } catch {
         Write-Warning "スクリーンショットに失敗: $_"
+    }
+
+    # パネルが自分で書いた絵（隠されていても取れる）。BMP なので PNG に直す。
+    $panelBmp = Join-Path $WorkDir "panel_live.bmp"
+    if (Test-Path -LiteralPath $panelBmp) {
+        try {
+            Add-Type -AssemblyName System.Drawing
+            $pb = [System.Drawing.Bitmap]::FromFile($panelBmp)
+            $panelPng = Join-Path $WorkDir "panel_live.png"
+            $pb.Save($panelPng, [System.Drawing.Imaging.ImageFormat]::Png)
+            $pb.Dispose()
+            Write-Host "パネル画像: $panelPng" -ForegroundColor Green
+        } catch {
+            Write-Warning "パネル画像の変換に失敗: $_"
+        }
+    } else {
+        Write-Warning "パネル画像がありません（パネルが開かなかった？）"
     }
 
     # --- 8) ログ ---

@@ -15,7 +15,9 @@ mod dsp;
 mod dump;
 mod ffi;
 mod filter;
+mod meter;
 mod paths;
+mod preset;
 mod ui;
 
 use ffi::*;

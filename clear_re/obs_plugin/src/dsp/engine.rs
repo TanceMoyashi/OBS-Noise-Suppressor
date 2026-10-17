@@ -6,7 +6,7 @@
 //! この遅延量は移植元の実測値 (`ANALYSIS.md` §13) と同じで、変えてはいけない。
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use super::net::DpdfNet;
@@ -45,21 +45,31 @@ impl Default for ParamSnapshot {
 pub struct Meters {
     /// 入力（加工前）の RMS [ch]。パネルのアナログ VU 用。
     in_rms: [AtomicU32; 2],
+    /// 入力（加工前）のピーク [ch]（ブロック内最大 + 短い戻り）。パネルの
+    /// ピークホールド表示用。
+    in_peak: [AtomicU32; 2],
     /// 出力（加工後）の RMS [ch]。GR メーター用。
     out_rms: [AtomicU32; 2],
     /// 出力の 3 バンド（低 / 中 / 高）RMS [ch][band]。
     levels: [[AtomicU32; 3]; 2],
+    /// 音声ブロックを処理するたびに増える通し番号。
+    ///
+    /// パネルはこれを見て「前回の描画から新しい音声が来たか」を判定し、
+    /// 来ていなければ針を静止位置へ戻す（無音時に針が止まらないように）。
+    seq: AtomicU64,
 }
 
 impl Meters {
     pub fn new() -> Self {
         Self {
             in_rms: [AtomicU32::new(0), AtomicU32::new(0)],
+            in_peak: [AtomicU32::new(0), AtomicU32::new(0)],
             out_rms: [AtomicU32::new(0), AtomicU32::new(0)],
             levels: [
                 [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)],
                 [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)],
             ],
+            seq: AtomicU64::new(0),
         }
     }
 
@@ -76,10 +86,27 @@ impl Meters {
         f32::from_bits(self.in_rms[ch.min(1)].load(Ordering::Relaxed))
     }
 
+    /// 入力（加工前）ピーク [ch]。
+    #[inline]
+    pub fn in_peak(&self, ch: usize) -> f32 {
+        f32::from_bits(self.in_peak[ch.min(1)].load(Ordering::Relaxed))
+    }
+
     /// 出力（加工後）RMS [ch]。
     #[inline]
     pub fn out_level(&self, ch: usize) -> f32 {
         f32::from_bits(self.out_rms[ch.min(1)].load(Ordering::Relaxed))
+    }
+
+    /// 処理した音声ブロックの通し番号。
+    #[inline]
+    pub fn seq(&self) -> u64 {
+        self.seq.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub(crate) fn bump_seq(&self) {
+        self.seq.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline]
@@ -92,6 +119,11 @@ impl Meters {
     #[inline]
     pub(crate) fn set_in(&self, ch: usize, v: f32) {
         self.in_rms[ch.min(1)].store(v.to_bits(), Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub(crate) fn set_in_peak(&self, ch: usize, v: f32) {
+        self.in_peak[ch.min(1)].store(v.to_bits(), Ordering::Relaxed);
     }
 
     #[inline]
@@ -166,6 +198,8 @@ pub struct Engine {
     meter_band_smoothed: [[f32; 3]; 2],
     /// 入力 RMS の平滑値（VU の針が暴れないように）。
     meter_in_smoothed: [f32; 2],
+    /// 入力ピーク（ブロック内最大 + 短い戻り）。パネルのピークホールド用。
+    meter_in_peak: [f32; 2],
     /// 出力 RMS の平滑値（GR = 入力 - 出力 の材料）。
     meter_out_smoothed: [f32; 2],
 
@@ -239,6 +273,7 @@ pub fn build(
         meter_lp_b: [0.0; 2],
         meter_band_smoothed: [[0.0; 3]; 2],
         meter_in_smoothed: [0.0; 2],
+        meter_in_peak: [0.0; 2],
         meter_out_smoothed: [0.0; 2],
         meters,
         num_channels,
@@ -294,6 +329,7 @@ impl Engine {
         self.meter_lp_b = [0.0; 2];
         self.meter_band_smoothed = [[0.0; 3]; 2];
         self.meter_in_smoothed = [0.0; 2];
+        self.meter_in_peak = [0.0; 2];
         self.meter_out_smoothed = [0.0; 2];
     }
 
@@ -316,6 +352,7 @@ impl Engine {
         // 入力レベル（VU 用）は加工前の値で測る。この時点の `buffers` は
         // まだ入力のまま（出力は下のループで上書きしていく）。
         let mut in_sum = [0.0f64; 2];
+        let mut in_abs = [0.0f32; 2];
 
         for i in 0..frames {
             for ch in 0..num_ch {
@@ -323,6 +360,7 @@ impl Engine {
                 let x = unsafe { *buffers[ch].add(i) };
                 if ch < 2 {
                     in_sum[ch] += (x as f64) * (x as f64);
+                    in_abs[ch] = in_abs[ch].max(x.abs());
                 }
                 self.in_fifo[ch][self.in_fill] = x;
             }
@@ -370,7 +408,8 @@ impl Engine {
             }
         }
 
-        self.update_meters(buffers, frames, num_ch, in_rms);
+        self.update_meters(buffers, frames, num_ch, in_rms, in_abs);
+        self.meters.bump_seq();
     }
 
     fn run_hop(&mut self, p: ParamSnapshot) {
@@ -457,6 +496,7 @@ impl Engine {
         frames: usize,
         num_ch: usize,
         in_rms: [f32; 2],
+        in_abs: [f32; 2],
     ) {
         if frames == 0 {
             return;
@@ -465,6 +505,8 @@ impl Engine {
         const DECAY: f32 = 0.35;
         // レベル（VU / GR）の戻り。1 ブロックごとに掛ける。
         const LEVEL_DECAY: f32 = 0.80;
+        // 入力ピークの戻り。パネルのホールドと合わせて「ゆっくり落ちる」見た目に。
+        const PEAK_DECAY: f32 = 0.85;
 
         let n = num_ch.min(2);
 
@@ -473,6 +515,11 @@ impl Engine {
             let sm_in = &mut self.meter_in_smoothed[ch];
             *sm_in = in_rms[ch].max(*sm_in * LEVEL_DECAY);
             self.meters.set_in(ch, *sm_in);
+
+            // 入力ピーク（パネルのピークホールド表示用）。
+            let pk = &mut self.meter_in_peak[ch];
+            *pk = in_abs[ch].max(*pk * PEAK_DECAY);
+            self.meters.set_in_peak(ch, *pk);
 
             // SAFETY: process() と同じ前提。書き換え後の値（= 出力）を読む。
             let p = unsafe { std::slice::from_raw_parts(buffers[ch], frames) };

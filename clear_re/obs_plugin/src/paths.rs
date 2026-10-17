@@ -28,6 +28,78 @@ pub const MODEL_FILE_NAMES: [&str; 4] = [
     "dpdfnet2_48khz_hr.onnx",
 ];
 
+/// 高品質モデル (dpdfnet8) のみ。2 出力版を優先。
+pub const MODEL_FILE_NAMES_DP8: [&str; 2] = [
+    "dpdfnet8_48khz_hr_2out.onnx",
+    "dpdfnet8_48khz_hr.onnx",
+];
+
+/// 軽量モデル (dpdfnet2) のみ。2 出力版を優先。
+pub const MODEL_FILE_NAMES_DP2: [&str; 2] = [
+    "dpdfnet2_48khz_hr_2out.onnx",
+    "dpdfnet2_48khz_hr.onnx",
+];
+
+/// 使用するモデルの選択（OBS のプロパティ「モデル」）。
+///
+/// 同梱しているのは `dpdfnet8` と `dpdfnet2` の 2 種だけなので、選択肢は
+/// この 3 つで足りる。保存される文字列 (`as_str`) は**変えてはいけない**
+/// （シーンコレクションに保存済みの値が読めなくなる）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ModelChoice {
+    /// 自動: 高品質を優先し、無ければ軽量に落ちる。
+    #[default]
+    Auto,
+    /// 高品質 (`dpdfnet8_*`)。
+    Quality,
+    /// 軽量・低負荷 (`dpdfnet2_*`)。
+    Fast,
+}
+
+impl ModelChoice {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Quality => "dp8",
+            Self::Fast => "dp2",
+        }
+    }
+
+    /// 設定文字列から。未知の値（空文字など）は `Auto`。
+    pub fn from_setting(s: &str) -> Self {
+        match s {
+            "dp8" | "quality" => Self::Quality,
+            "dp2" | "fast" => Self::Fast,
+            _ => Self::Auto,
+        }
+    }
+
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Auto => 0,
+            Self::Quality => 1,
+            Self::Fast => 2,
+        }
+    }
+
+    pub fn from_code(c: u8) -> Self {
+        match c {
+            1 => Self::Quality,
+            2 => Self::Fast,
+            _ => Self::Auto,
+        }
+    }
+
+    /// 探索するファイル名（優先順）。
+    pub fn names(self) -> &'static [&'static str] {
+        match self {
+            Self::Auto => &MODEL_FILE_NAMES,
+            Self::Quality => &MODEL_FILE_NAMES_DP8,
+            Self::Fast => &MODEL_FILE_NAMES_DP2,
+        }
+    }
+}
+
 /// 同梱 ONNX Runtime のファイル名。
 ///
 /// **`onnxruntime.dll` という名前で System32 から読み込んではいけない**。
@@ -97,10 +169,10 @@ fn known_documents() -> Option<PathBuf> {
     }
 }
 
-/// ディレクトリ群の中から最初に見つかったモデルを返す。
-pub fn find_model(extra_dirs: &[PathBuf]) -> Option<PathBuf> {
+/// ディレクトリ群の中から最初に見つかったモデルを返す（モデル種別を指定）。
+pub fn find_model_choice(choice: ModelChoice, extra_dirs: &[PathBuf]) -> Option<PathBuf> {
     for dir in model_dirs(extra_dirs) {
-        for name in MODEL_FILE_NAMES {
+        for name in choice.names() {
             let p = dir.join(name);
             if p.is_file() {
                 return Some(p);
@@ -108,6 +180,32 @@ pub fn find_model(extra_dirs: &[PathBuf]) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// ユーザー設定のファイルパス（`obs_module_config_path(name)` 相当）。
+///
+/// `%APPDATA%\obs-studio\plugin_config\obs_noise_suppressor\<name>`。
+/// ディレクトリは libobs 側が作る。モジュールポインタ未設定なら `None`。
+pub fn config_file(name: &str) -> Option<PathBuf> {
+    let module = crate::MODULE_POINTER.load(std::sync::atomic::Ordering::SeqCst);
+    if module.is_null() {
+        return None;
+    }
+
+    let c = std::ffi::CString::new(name).ok()?;
+    let p = unsafe { crate::ffi::obs_module_get_config_path(module, c.as_ptr()) };
+    if p.is_null() {
+        return None;
+    }
+
+    let s = unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned();
+    unsafe { crate::ffi::bfree(p as *mut std::ffi::c_void) };
+
+    if s.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(s))
+    }
 }
 
 /// モデル探索ディレクトリ（優先順）。
@@ -210,4 +308,42 @@ pub fn ort_dll_candidates(extra_dirs: &[PathBuf]) -> Vec<PathBuf> {
 
     out.retain(|p| p.is_file());
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_choice_round_trips() {
+        for c in [ModelChoice::Auto, ModelChoice::Quality, ModelChoice::Fast] {
+            assert_eq!(ModelChoice::from_setting(c.as_str()), c);
+            assert_eq!(ModelChoice::from_code(c.code()), c);
+        }
+    }
+
+    #[test]
+    fn unknown_model_setting_falls_back_to_auto() {
+        assert_eq!(ModelChoice::from_setting(""), ModelChoice::Auto);
+        assert_eq!(ModelChoice::from_setting("dpdfnet8"), ModelChoice::Auto);
+        assert_eq!(ModelChoice::from_code(255), ModelChoice::Auto);
+        assert_eq!(ModelChoice::default(), ModelChoice::Auto);
+    }
+
+    #[test]
+    fn model_choice_accepts_aliases() {
+        assert_eq!(ModelChoice::from_setting("quality"), ModelChoice::Quality);
+        assert_eq!(ModelChoice::from_setting("fast"), ModelChoice::Fast);
+    }
+
+    #[test]
+    fn model_names_are_ordered_by_preference() {
+        // 2 出力版 (Voice Reverb 付き) を先に見る。
+        assert_eq!(ModelChoice::Quality.names()[0], "dpdfnet8_48khz_hr_2out.onnx");
+        assert_eq!(ModelChoice::Fast.names()[0], "dpdfnet2_48khz_hr_2out.onnx");
+        // Auto は 4 ファイル全部を品質優先で見る。
+        assert_eq!(ModelChoice::Auto.names().len(), MODEL_FILE_NAMES.len());
+        assert_eq!(ModelChoice::Auto.names()[0], "dpdfnet8_48khz_hr_2out.onnx");
+        assert_eq!(ModelChoice::Auto.names()[3], "dpdfnet2_48khz_hr.onnx");
+    }
 }

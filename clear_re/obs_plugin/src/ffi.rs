@@ -67,6 +67,12 @@ pub const OBS_PROPERTY_BOOL: c_int = 1;
 pub const OBS_PROPERTY_FLOAT: c_int = 3;
 pub const OBS_TEXT_INFO: c_int = 3;
 
+/// `enum obs_combo_type` (libobs/obs-properties.h)。0 = INVALID / 1 = EDITABLE /
+/// 2 = LIST / 3 = RADIO。**値はヘッダの並び順そのまま**。
+pub const OBS_COMBO_TYPE_LIST: c_int = 2;
+/// `enum obs_combo_format`。0 = INVALID / 1 = INT / 2 = FLOAT / 3 = STRING。
+pub const OBS_COMBO_FORMAT_STRING: c_int = 3;
+
 /// `enum speaker_layout` (media-io/audio-io.h)
 pub const SPEAKERS_UNKNOWN: c_int = 0;
 pub const SPEAKERS_MONO: c_int = 1;
@@ -263,6 +269,23 @@ extern "C" {
         group: *mut obs_properties_t,
     ) -> *mut obs_property_t;
 
+    /// ドロップダウン（`type_` = `OBS_COMBO_TYPE_LIST` / `format` = `OBS_COMBO_FORMAT_STRING`）。
+    pub fn obs_properties_add_list(
+        props: *mut obs_properties_t,
+        name: *const c_char,
+        description: *const c_char,
+        type_: c_int,
+        format: c_int,
+    ) -> *mut obs_property_t;
+    /// リストに 1 項目足す。戻り値は追加後の項目数（使わない）。
+    pub fn obs_property_list_add_string(
+        p: *mut obs_property_t,
+        name: *const c_char,
+        val: *const c_char,
+    ) -> usize;
+    /// リスト項目を使えない状態にする（プラグインに同梱されていないモデルなど）。
+    pub fn obs_property_list_item_disable(p: *mut obs_property_t, idx: usize, disabled: bool);
+
     pub fn obs_property_set_long_description(p: *mut obs_property_t, long_description: *const c_char);
     pub fn obs_property_set_visible(p: *mut obs_property_t, visible: bool);
     pub fn obs_property_float_set_suffix(p: *mut obs_property_t, suffix: *const c_char);
@@ -273,6 +296,10 @@ extern "C" {
 
     /// `obs_module_file()` マクロの実体。戻り値は `bfree` で解放する。
     pub fn obs_find_module_file(module: *mut obs_module_t, file: *const c_char) -> *mut c_char;
+
+    /// `obs_module_config_path()` マクロの実体（`%APPDATA%\obs-studio\plugin_config\<module>\`）。
+    /// 戻り値は `bfree` で解放する。ディレクトリは libobs 側が作る。
+    pub fn obs_module_get_config_path(module: *mut obs_module_t, file: *const c_char) -> *mut c_char;
 
     // -- 音声設定（フィルタのチャンネル数/サンプルレートを知る） ---------------
     pub fn obs_get_audio() -> *mut c_void;

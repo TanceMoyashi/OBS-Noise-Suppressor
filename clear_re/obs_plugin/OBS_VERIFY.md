@@ -88,9 +88,13 @@ cd obs_plugin
 | ファイル | 内容 |
 | --- | --- |
 | `dump_in.wav` / `dump_out.wav` | フィルタ前後の音（32 bit float, OBS 内部と同じ形式） |
-| `obs_panel.png` | 全画面スクリーンショット（パネルの見た目） |
+| `panel_live.png` | **パネル自身が書いた絵**（隠されていても取れる。メーターは実測値） |
+| `obs_panel.png` | 全画面スクリーンショット（他のウィンドウが前に出ていると写らない） |
 | `elevated.log` | 昇格側のログ（全文） |
 | `user.ini.bak` | 検証前の `user.ini` の控え |
+
+> `panel_live.png` は `DPDFNET_PANEL_SNAPSHOT` にパスを入れると、パネルが開いて
+> 5 秒後（メーターが動いてから）に自分の DIB を 32 bit BMP で書き出したものです。
 
 ### 期待する出力（このマシンでの実測）
 
@@ -99,8 +103,8 @@ cd obs_plugin
 [obs-noise-suppressor] onnxruntime 1.31.0 (...\plugins\obs_noise_suppressor\data\dpdfnet_onnxruntime.dll) を読み込みました
 [obs-noise-suppressor] status: 48 kHz / ch=2 / latency 2880 samples / dpdfnet8_48khz_hr_2out.onnx | n_fft=960 hop=480 state=90228 outputs=2
 
-実機 lag = 2880 samples (6.000 hop, 60.0 ms) corr = 0.8165 (in_rms 0.115885 out_rms 0.027794)
-参照 vs 実機: 1256832 frames x 2 ch / max diff = 0e0 / diff rms = 0e0
+実機 lag = 2880 samples (6.000 hop, 60.0 ms) corr = 0.8140 (in_rms 0.114889 out_rms 0.027569)
+参照 vs 実機: 1248640 frames x 2 ch / max diff = 0e0 / diff rms = 0e0
 test result: ok. 1 passed; 0 failed
 ```
 
@@ -145,6 +149,12 @@ test result: ok. 1 passed; 0 failed
 | **Ambience** 左→右 | 左で最大抑圧、右で入力に近づく（環境ノイズが戻る） |
 | **Voice** −12→+12 | 高域の色づけと音量の変化 |
 | **BYPASS** | 素通しに戻る。**遅延は維持されない**（切り替えると音の位置が 60 ms 飛ぶ） |
+| **モデル** を dp8 ↔ dp2 | 数十 ms 無音になったあと、効きと CPU 負荷が変わる（dp2 が軽い） |
+| **VU 基準値** を −20 / −18 / −14 | 針の位置と VU 目盛りが平行移動する（音は変わらない） |
+| **メモリー** SAVE → 番号 | LED が点く。別の値にして番号を押すと戻る。OBS 再起動後も残る |
+| **メモリー** Ctrl + 番号 | 消去され、LED が消える |
+| フェーダー / VU の **dB と %** | 数字が実際の値と一致する（VU の窓 = 現在値とピーク dBFS） |
+| VU 窓を**ダブルクリック** | ピークホールドが消える |
 
 **リアルタイム性の確認（重要）**:
 
@@ -243,12 +253,36 @@ $env:DPDFNET_MODEL = 'D:\...\plugin\models\dpdfnet8_48khz_hr_2out.onnx'
 - ロード: `[obs-noise-suppressor] module loaded (libobs api 0x20020002, obs_source_info 424 bytes, ort api 17)`
 - ORT: `onnxruntime 1.31.0 (C:\ProgramData\obs-studio\plugins\obs_noise_suppressor\data\dpdfnet_onnxruntime.dll)`
 - 状態: `status: 48 kHz / ch=2 / latency 2880 samples / dpdfnet8_48khz_hr_2out.onnx | n_fft=960 hop=480 state=90228 outputs=2`
-- 実機遅延: `2880 samples (6.000 hop, 60.0 ms)` / 相関 `0.8165`
-- 実機 vs オフライン参照: `1256832 frames x 2 ch / max diff = 0e0 / diff rms = 0e0`（**ビット一致**）
-- パネル: ウィンドウが表示され、入力 VU 2 本・縦フェーダー 3 本・GR / 3 バンド
-  メーター・ステータス・BYPASS が正しく描画されることをスクリーンショットで確認
+- 実機遅延: `2880 samples (6.000 hop, 60.0 ms)` / 相関 `0.8140`
+- 実機 vs オフライン参照: `1248640 frames x 2 ch / max diff = 0e0 / diff rms = 0e0`（**ビット一致**）
+- パネル: `パネルを表示しました (858, 488, 844x464, scale 1.00)` → `panel_live.png` で
+  **入力 VU 2 本（針 + 現在値 / ピーク dBFS）・縦フェーダー 3 本（dB と % 併記）・
+  GR メーター（実測 -17.4 dB）・3 バンドメーター・メモリー行・MODEL 刻印** が
+  実測値つきで正しく描画されることを確認（`panel_live.png`）
+- メーターの実測: 入力 `-29.9 dBFS` / ピーク `-4.9 dBFS`（検証用 wav を通した値）
 - エンジン生成の検証: `activate` を一時的に無効化しても、`create` 時点で ORT が
   読み込まれ `status:` 行が出て、実機 vs オフライン参照がビット一致することを確認
   （= 後からフィルタを追加したケースでも動く）
-- 自動テスト: `cargo test --release --lib` → **15 passed / 0 failed**
+- 自動テスト: `cargo test --release --lib` → **38 passed / 0 failed**（UI のスナップショット、
+  メーターの弾道、プリセットの JSON、モデル / VU 基準値の往復を含む）
+- インストール済み DLL の SHA256: `679ea862dc57c91a5864b89a8838e6c5318770f4b638e807f1ff3206e028d6fc`
 - OBS は WM_CLOSE で正常終了し、`user.ini` は検証前の状態へ復元された
+
+### v0.2.0（2026-10-18 実施）
+
+同じ `run_obs_verify.ps1` を再実行（5 機能 + パネルの質感改修を入れた後）:
+
+- ロード: `module loaded (libobs api 0x20020002, obs_source_info 424 bytes, ort api 17)`
+- 状態: `status: 48 kHz / ch=2 / latency 2880 samples / dpdfnet8_48khz_hr_2out.onnx | n_fft=960 hop=480 state=90228 outputs=2`
+- 実機遅延: `2880 samples (6.000 hop, 60.0 ms)` / 相関 `0.7986`
+- 実機 vs オフライン参照: `998784 frames x 2 ch / max diff = 0e0 / diff rms = 0e0`（**ビット一致**）
+- パネル: `パネルを表示しました (858, 488, 844x464, scale 1.00)` →
+  `panel_live.png`（実際に音を流した状態）。**アンバーに灯る VU 盤面（上ほど暖色）・
+  太い黒の弧と 0 〜 +3 の赤いオーバーロード帯・赤い「0」「+3」・2 本目の細い
+  校正弧（50 / 100 %）・細い黒針と支点カバー・ガラスの斜めの反射**、面板の
+  ヘアラインと十字ネジ、フェーダーの金属レールまで描画されることを確認
+- メーターの実測: 入力 `-27.9 dBFS` / ピーク `-4.9 dBFS` / GR `-17.1 dB`
+- 自動テスト: `cargo test --release --lib` → **38 passed / 0 failed**
+- ビルド警告: Release / Debug ともに **0 件**
+- インストール済み DLL の SHA256: `d4d480e502f94b82fc7876d61935f83a07706e8f7a9fd0687910842e7a4095e2`
+  （ビルド出力と一致、1,586,176 bytes）
