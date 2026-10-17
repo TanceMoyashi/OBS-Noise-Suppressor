@@ -10,10 +10,23 @@
 //!   * `create` / `update` / `activate` / `deactivate` / `destroy` は UI スレッド
 //!   * `filter_audio` はオーディオスレッド
 //!
-//! libobs は `update` と `filter_audio` の相互排他を**してくれない**
-//! (`obs_source_update` は音声専用ソースでは `filter_mutex` を取らない)。
-//! そのため `update` はアトミックなパラメータ書き込みだけを行い、
-//! エンジン（= ORT セッション）の再構築は `activate` でのみ行う。
+//! エンジン (= ORT セッション) は `create` / `update` / `activate` の
+//! UI スレッドで組み立てる。
+//!
+//! **`activate` だけに頼ってはいけない。** libobs がフィルタを activate するのは
+//! `obs_source_video_tick()` の中で「親ソースのアクティブ状態が変化した時」だけ
+//! なので (`libobs/obs-source.c` の 1404-1421 行)、
+//!
+//!   * すでにアクティブなソースに後からフィルタを追加した場合
+//!   * 映像を持たない音声ソース (マイクなど)
+//!
+//! では `activate` が一度も呼ばれない。`create` は必ず呼ばれるので、ここで
+//! 作っておくのが本筋。
+//!
+//! 差し替え中の安全性: libobs は `update` と `filter_audio` の相互排他を
+//! してくれない (`obs_source_update` は音声専用ソースでは `filter_mutex` を
+//! 取らない)。だから古いエンジンは即座に破棄せず `retired` に積んでおき、
+//! もう呼ばれないことが確実な `destroy` でまとめて破棄する。
 
 use std::ffi::{c_char, CStr};
 use std::os::raw::c_void;
@@ -127,8 +140,12 @@ pub struct Shared {
     /// 開いているパネルの `HWND`（0 = 閉じている）。UI スレッドのみが書く。
     pub panel: AtomicUsize,
 
-    /// 2 出力モデル（dereverb あり）か。パネルの REVERB ノブの有効/無効に使う。
+    /// 2 出力モデル（dereverb あり）か。パネルの REVERB フェーダーの有効/無効に使う。
     pub dereverb: AtomicBool,
+
+    /// 現在のエンジンのチャンネル数（1 = モノラル / 2 = ステレオ）。
+    /// パネルがメーターを間引くのに使う。0 = エンジン未構築。
+    pub channels: AtomicUsize,
 
     status: AtomicU32,
     status_detail: Mutex<String>,
@@ -144,6 +161,7 @@ impl Shared {
             alive: AtomicBool::new(true),
             panel: AtomicUsize::new(0),
             dereverb: AtomicBool::new(false),
+            channels: AtomicUsize::new(0),
             status: AtomicU32::new(ST_INACTIVE),
             status_detail: Mutex::new(String::new()),
             summary: Mutex::new(String::new()),
@@ -190,12 +208,19 @@ pub struct FilterData {
 
     /// 現在のエンジン。`null` はパススルー。
     ///
-    /// 書き換えは UI スレッド (`activate` / `destroy`) のみ。オーディオスレッドは
-    /// `Acquire` で読んで使う。`activate` は「まだ音が流れていない」時点で
-    /// 呼ばれるため、差し替え中の競合は実質起きない（OBS の音声フィルタは
-    /// activate 前に `filter_audio` を呼ばない）。
+    /// 書き換えは UI スレッド (`create` / `update` / `activate` / `destroy`) のみ。
+    /// オーディオスレッドは `Acquire` で読んで使う。古いエンジンは即座に破棄せず
+    /// `retired` に積んで `destroy` で破棄する（`filter_audio` が掴んでいる
+    /// 可能性があるため）。
     engine: AtomicPtr<Engine>,
     engine_channels: AtomicUsize,
+
+    /// 差し替えで引退したエンジン。オーディオスレッドがまだ使っている可能性が
+    /// あるので、`destroy` まで保持する。
+    retired: Mutex<Vec<*mut Engine>>,
+
+    /// 「エンジンが無いのでパススルー中」を一度だけログしたか。
+    passthrough_logged: AtomicBool,
 
     /// 再生位置 (ns)。不連続を検出してリセットするため。
     last_timestamp: AtomicU64,
@@ -221,6 +246,8 @@ impl FilterData {
             shared: Arc::new(Shared::new(Arc::new(Meters::new()))),
             engine: AtomicPtr::new(ptr::null_mut()),
             engine_channels: AtomicUsize::new(0),
+            retired: Mutex::new(Vec::new()),
+            passthrough_logged: AtomicBool::new(false),
             last_timestamp: AtomicU64::new(0),
             source,
             resource_dirs,
@@ -238,7 +265,8 @@ impl FilterData {
         self.shared.set_status_detail(status, detail)
     }
 
-    /// エンジンを（必要なら）組み立てる。UI スレッド専用。
+    /// エンジンを（必要なら）組み立てる。UI スレッド専用
+    /// (`create` / `update` / `activate` から呼ぶ)。
     pub fn activate_engine(&self) -> bool {
         let audio = unsafe { crate::ffi::obs_get_audio() };
         if audio.is_null() {
@@ -300,6 +328,7 @@ impl FilterData {
                 let old = self.engine.swap(ptr, Ordering::AcqRel);
                 self.engine_channels.store(want, Ordering::Relaxed);
                 self.shared.dereverb.store(dereverb, Ordering::Relaxed);
+                self.shared.channels.store(want, Ordering::Relaxed);
 
                 // 実機検証用のダンプ（`DPDFNET_DUMP` 未設定なら何もしない）。
                 if let Ok(mut g) = self.dump.lock() {
@@ -309,9 +338,14 @@ impl FilterData {
                 }
 
                 if !old.is_null() {
-                    // activate は音が流れていない時点なので安全に破棄できる。
-                    unsafe { drop(Box::from_raw(old)) };
+                    // `update` 経由でも呼ばれる = 音が流れている最中かもしれない。
+                    // オーディオスレッドがまだ古いエンジンを掴んでいる可能性が
+                    // あるので、ここでは破棄せず destroy まで持っておく。
+                    self.retire(old);
                 }
+
+                // 無事できたので、次のパススルー警告はまた出せるようにする。
+                self.passthrough_logged.store(false, Ordering::Relaxed);
 
                 self.set_status_detail(
                     ST_OK,
@@ -345,8 +379,32 @@ impl FilterData {
     pub fn drop_engine(&self) {
         let old = self.engine.swap(ptr::null_mut(), Ordering::AcqRel);
         self.engine_channels.store(0, Ordering::Relaxed);
+        self.shared.channels.store(0, Ordering::Relaxed);
         if !old.is_null() {
             unsafe { drop(Box::from_raw(old)) };
+        }
+    }
+
+    /// 差し替えで不要になったエンジンを「引退」させる（破棄はしない）。
+    fn retire(&self, engine: *mut Engine) {
+        let mut g = match self.retired.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        g.push(engine);
+    }
+
+    /// 引退したエンジンをまとめて破棄する。もうオーディオスレッドから
+    /// 呼ばれないことが確実な `destroy` からのみ呼ぶこと。
+    pub fn free_retired(&self) {
+        let mut g = match self.retired.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        for p in g.drain(..) {
+            if !p.is_null() {
+                unsafe { drop(Box::from_raw(p)) };
+            }
         }
     }
 }
@@ -420,6 +478,12 @@ pub unsafe extern "C" fn create(
             fd.shared.params.voice(),
             fd.shared.params.voice_reverb()
         );
+        // ここでエンジンまで作っておく。libobs はフィルタの `activate` を
+        // 「親ソースのアクティブ状態が変化した時」しか呼ばないため、
+        // (1) すでにアクティブなソースへ後から追加した場合や
+        // (2) 映像を持たない音声ソースでは `activate` が来ず、
+        // パススルーのまま動かなくなる。`create` は必ず呼ばれる。
+        fd.activate_engine();
         Box::into_raw(fd) as *mut c_void
     })
 }
@@ -434,6 +498,9 @@ pub unsafe extern "C" fn destroy(data: *mut c_void) {
         fd.shared.alive.store(false, Ordering::SeqCst);
         ui::close_panel(&fd.shared);
         fd.drop_engine();
+        // 差し替えで引退したエンジンもここでまとめて破棄する
+        // (もうオーディオスレッドからは呼ばれない)。
+        fd.free_retired();
         // ダンプはヘッダを書き戻して閉じる（WAV として読めるように）。
         if let Ok(mut g) = fd.dump.lock() {
             if let Some(d) = g.as_mut() {
@@ -471,6 +538,11 @@ pub unsafe extern "C" fn update(data: *mut c_void, settings: *mut crate::ffi::ob
         // アトミック書き込みのみ。エンジンには触らない。
         let fd = &*(data as *const FilterData);
         fd.shared.params.read_settings(settings);
+        // レート/チャンネル数が変わっていたら作り直す。古いエンジンは
+        // `retired` に積まれるので、オーディオスレッドが使用中でも安全。
+        // (モデル未配置のまま起動した後、配置してから「OK」を押した場合の
+        //  再試行も兼ねる。)
+        fd.activate_engine();
         obs_log!(
             crate::ffi::LOG_DEBUG,
             "settings updated (ambience {:.2}, voice {:.2} dB, reverb {:.2})",
@@ -573,7 +645,7 @@ pub unsafe extern "C" fn get_properties(
             c"残す残響（モデルが 2 出力のときのみ有効）".as_ptr(),
         );
 
-        // 自前 Win32 パネル（ノブ + メーター）。`data` はこのフィルタの
+        // 自前 Win32 パネル（フェーダー + メーター）。`data` はこのフィルタの
         // `FilterData` なので、そのまま `priv` として渡せる。
         if !data.is_null() {
             crate::ffi::obs_properties_add_button2(
@@ -630,6 +702,15 @@ pub unsafe extern "C" fn filter_audio(
         let fd = &*(data as *const FilterData);
         let engine_ptr = fd.engine_ptr();
         if engine_ptr.is_null() {
+            // 一度だけ理由を出す。原因切り分けに一番効く
+            // (OBS が 48 kHz でない / モデルが無い / エンジン未構築 等)。
+            if !fd.passthrough_logged.swap(true, Ordering::Relaxed) {
+                obs_log!(
+                    crate::ffi::LOG_WARNING,
+                    "エンジン未構築のためパススルーします: {}",
+                    fd.status_detail()
+                );
+            }
             return; // パススルー
         }
 

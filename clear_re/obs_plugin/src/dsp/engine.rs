@@ -39,14 +39,23 @@ impl Default for ParamSnapshot {
 }
 
 /// レベルメータ。オーディオスレッドが書き、UI スレッドが読む。
+///
+/// すべてリニア RMS（フルスケール = 1.0）。UI 側で dB / VU / GR に変換する。
 #[derive(Debug)]
 pub struct Meters {
+    /// 入力（加工前）の RMS [ch]。パネルのアナログ VU 用。
+    in_rms: [AtomicU32; 2],
+    /// 出力（加工後）の RMS [ch]。GR メーター用。
+    out_rms: [AtomicU32; 2],
+    /// 出力の 3 バンド（低 / 中 / 高）RMS [ch][band]。
     levels: [[AtomicU32; 3]; 2],
 }
 
 impl Meters {
     pub fn new() -> Self {
         Self {
+            in_rms: [AtomicU32::new(0), AtomicU32::new(0)],
+            out_rms: [AtomicU32::new(0), AtomicU32::new(0)],
             levels: [
                 [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)],
                 [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)],
@@ -61,11 +70,33 @@ impl Meters {
         f32::from_bits(self.levels[ch][band].load(Ordering::Relaxed))
     }
 
+    /// 入力（加工前）RMS [ch]。
+    #[inline]
+    pub fn in_level(&self, ch: usize) -> f32 {
+        f32::from_bits(self.in_rms[ch.min(1)].load(Ordering::Relaxed))
+    }
+
+    /// 出力（加工後）RMS [ch]。
+    #[inline]
+    pub fn out_level(&self, ch: usize) -> f32 {
+        f32::from_bits(self.out_rms[ch.min(1)].load(Ordering::Relaxed))
+    }
+
     #[inline]
     pub(crate) fn set(&self, ch: usize, band: usize, v: f32) {
         let ch = ch.min(1);
         let band = band.min(2);
         self.levels[ch][band].store(v.to_bits(), Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub(crate) fn set_in(&self, ch: usize, v: f32) {
+        self.in_rms[ch.min(1)].store(v.to_bits(), Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub(crate) fn set_out(&self, ch: usize, v: f32) {
+        self.out_rms[ch.min(1)].store(v.to_bits(), Ordering::Relaxed);
     }
 }
 
@@ -133,6 +164,10 @@ pub struct Engine {
     meter_lp_a: [f32; 2],
     meter_lp_b: [f32; 2],
     meter_band_smoothed: [[f32; 3]; 2],
+    /// 入力 RMS の平滑値（VU の針が暴れないように）。
+    meter_in_smoothed: [f32; 2],
+    /// 出力 RMS の平滑値（GR = 入力 - 出力 の材料）。
+    meter_out_smoothed: [f32; 2],
 
     pub meters: Arc<Meters>,
     pub num_channels: usize,
@@ -203,6 +238,8 @@ pub fn build(
         meter_lp_a: [0.0; 2],
         meter_lp_b: [0.0; 2],
         meter_band_smoothed: [[0.0; 3]; 2],
+        meter_in_smoothed: [0.0; 2],
+        meter_out_smoothed: [0.0; 2],
         meters,
         num_channels,
         dereverb_available,
@@ -252,6 +289,12 @@ impl Engine {
 
         self.voice_hp_state.iter_mut().for_each(|v| *v = 0.0);
         self.voice_hp_prev_x.iter_mut().for_each(|v| *v = 0.0);
+
+        self.meter_lp_a = [0.0; 2];
+        self.meter_lp_b = [0.0; 2];
+        self.meter_band_smoothed = [[0.0; 3]; 2];
+        self.meter_in_smoothed = [0.0; 2];
+        self.meter_out_smoothed = [0.0; 2];
     }
 
     /// その場で `buffers` を書き換える。長さは `num_channels` 以上、各要素は
@@ -270,10 +313,18 @@ impl Engine {
 
         let hop = self.hop;
 
+        // 入力レベル（VU 用）は加工前の値で測る。この時点の `buffers` は
+        // まだ入力のまま（出力は下のループで上書きしていく）。
+        let mut in_sum = [0.0f64; 2];
+
         for i in 0..frames {
             for ch in 0..num_ch {
                 // SAFETY: 呼び出し側が frames サンプル以上の有効なバッファを渡す。
-                self.in_fifo[ch][self.in_fill] = unsafe { *buffers[ch].add(i) };
+                let x = unsafe { *buffers[ch].add(i) };
+                if ch < 2 {
+                    in_sum[ch] += (x as f64) * (x as f64);
+                }
+                self.in_fifo[ch][self.in_fill] = x;
             }
 
             self.in_fill += 1;
@@ -312,7 +363,14 @@ impl Engine {
             }
         }
 
-        self.update_meters(buffers, frames, num_ch);
+        let mut in_rms = [0.0f32; 2];
+        if frames > 0 {
+            for ch in 0..num_ch.min(2) {
+                in_rms[ch] = (in_sum[ch] / frames as f64).sqrt() as f32;
+            }
+        }
+
+        self.update_meters(buffers, frames, num_ch, in_rms);
     }
 
     fn run_hop(&mut self, p: ParamSnapshot) {
@@ -393,15 +451,30 @@ impl Engine {
         }
     }
 
-    fn update_meters(&mut self, buffers: &[*mut f32], frames: usize, num_ch: usize) {        if frames == 0 {
+    fn update_meters(
+        &mut self,
+        buffers: &[*mut f32],
+        frames: usize,
+        num_ch: usize,
+        in_rms: [f32; 2],
+    ) {
+        if frames == 0 {
             return;
         }
 
         const DECAY: f32 = 0.35;
+        // レベル（VU / GR）の戻り。1 ブロックごとに掛ける。
+        const LEVEL_DECAY: f32 = 0.80;
+
         let n = num_ch.min(2);
 
         for ch in 0..n {
-            // SAFETY: process() と同じ前提。書き換え後の値を読む。
+            // 入力レベル（VU 用）: 加工前の値。立ち上がりは即時、戻りはゆっくり。
+            let sm_in = &mut self.meter_in_smoothed[ch];
+            *sm_in = in_rms[ch].max(*sm_in * LEVEL_DECAY);
+            self.meters.set_in(ch, *sm_in);
+
+            // SAFETY: process() と同じ前提。書き換え後の値（= 出力）を読む。
             let p = unsafe { std::slice::from_raw_parts(buffers[ch], frames) };
 
             let mut s_a = self.meter_lp_a[ch];
@@ -410,6 +483,7 @@ impl Engine {
             let inv_b = 1.0 - self.meter_lp_b_coef;
 
             let mut sum = [0.0f64; 3];
+            let mut sum_out = 0.0f64;
 
             for &x in p {
                 s_a += inv_a * (x - s_a);
@@ -422,10 +496,17 @@ impl Engine {
                 sum[0] += (low as f64) * (low as f64);
                 sum[1] += (mid as f64) * (mid as f64);
                 sum[2] += (high as f64) * (high as f64);
+                sum_out += (x as f64) * (x as f64);
             }
 
             self.meter_lp_a[ch] = s_a;
             self.meter_lp_b[ch] = s_b;
+
+            // 出力レベル（GR = 入力 - 出力 の材料）。
+            let out_rms = (sum_out / frames as f64).sqrt() as f32;
+            let sm_out = &mut self.meter_out_smoothed[ch];
+            *sm_out = out_rms.max(*sm_out * LEVEL_DECAY);
+            self.meters.set_out(ch, *sm_out);
 
             for b in 0..3 {
                 let rms = (sum[b] / frames as f64).sqrt() as f32;

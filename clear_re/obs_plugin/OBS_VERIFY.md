@@ -115,7 +115,7 @@ test result: ok. 1 passed; 0 failed
 1. OBS に **メディアソース** を追加 → `plugin\test_signals\speech_tail_reverb_48k.wav`、
    **ループ ON**、ミュートでよい
 2. そのソース → **フィルタ** → `+` → **OBS Noise Suppressor**
-3. プロパティの **「パネルを開く（ノブ / メーター）」** ボタンでパネルが開く
+3. プロパティの **「パネルを開く（フェーダー / メーター）」** ボタンでパネルが開く
 4. プロパティの説明欄（＝状態表示）を確認する
 
 | 表示 | 意味 |
@@ -131,7 +131,7 @@ test result: ok. 1 passed; 0 failed
 のように短く出ます（詳細はプロパティ側）。
 
 5. メディアソースの音声メーターが動いていれば DSP が回っています
-6. パネルの 3 バンドメーターも反応します
+6. パネルの GR メーター（抑圧量）と 3 バンドメーターも反応します
 
 ### 聴いて確認
 
@@ -201,7 +201,7 @@ $env:DPDFNET_MODEL = 'D:\...\plugin\models\dpdfnet8_48khz_hr_2out.onnx'
 | ノイズが消えない | メーターが動いているか、`data\models` の配置、モデル名 |
 | プツプツ切れる | OBS の統計（ドロップフレーム）、CPU。`dpdfnet8_*.onnx` をどけて dpdfnet2 に |
 | 音が 60 ms ずれる | 仕様（§0 / §2）。フィルタ無しのソースと混ぜない |
-| REVERB ノブがグレー | 1 出力モデルしか無い（`*_2out.onnx` を `data\models` に置く） |
+| REVERB フェーダーがグレー | 1 出力モデルしか無い（`*_2out.onnx` を `data\models` に置く） |
 | **フィルタを選んだ瞬間に OBS が落ちる** | 同梱 ORT の名前を確認。`onnxruntime.dll` という名前で置くと System32 の ORT 1.17 を掴んで即死する（現在は `dpdfnet_onnxruntime.dll`）。ログに `onnxruntime 1.31.0 (…plugins\obs_noise_suppressor\data\dpdfnet_onnxruntime.dll) を読み込みました` と出れば正常 |
 | 状態が `onnxruntime を読み込めません` | 同梱 DLL の配置・サイズ。`DPDFNET_ORT` で明示指定も可 |
 | パネルが開かない | OBS のログに `パネルを開けません:` が出ていないか。プロパティのボタンをもう一度押す |
@@ -220,7 +220,15 @@ $env:DPDFNET_MODEL = 'D:\...\plugin\models\dpdfnet8_48khz_hr_2out.onnx'
   profile `dpdfnet8_48khz_hr_2out`（`freq_bins=481`, `state=90228`, 2 出力）
 - OBS は `update` と `filter_audio` の相互排他をしない（音声専用ソースでは
   `filter_mutex` を取らない）。そのため `update` はアトミックなパラメータ書き込み
-  だけを行い、ORT セッションの再構築は `activate` でのみ行う。
+  だけを行い、ORT セッションの再構築はエンジン生成専用の経路で行う。
+- libobs はフィルタの `activate` を「親ソースのアクティブ状態が変化した時」しか
+  呼ばない（`libobs/obs-source.c`）。`obs_source_filter_add` 自体はアクティブ化
+  しないため、**すでにアクティブなソースへ後からフィルタを追加したケースでは
+  `activate` が来ない**。そのためエンジンは `create` / `update` / `activate` の
+  いずれでも生成する（`create` 時点で生成していなかった版では、この経路で
+  永久にパススルーになっていた）。
+- エンジンの差し替え時は古いエンジンをその場で破棄せず「引退リスト」に移し、
+  `destroy` でまとめて破棄する（オーディオスレッドが使用中の可能性があるため）。
 - パネルは専用スレッド + 専用メッセージループ。状態は `Arc<Shared>` で共有し、
   フィルタが先に破棄されたら `Shared::alive` が false になって触らなくなる。
 - パニックは FFI 境界ごとに `catch_unwind` で捕まえ、パススルーへ退避する
@@ -237,7 +245,10 @@ $env:DPDFNET_MODEL = 'D:\...\plugin\models\dpdfnet8_48khz_hr_2out.onnx'
 - 状態: `status: 48 kHz / ch=2 / latency 2880 samples / dpdfnet8_48khz_hr_2out.onnx | n_fft=960 hop=480 state=90228 outputs=2`
 - 実機遅延: `2880 samples (6.000 hop, 60.0 ms)` / 相関 `0.8165`
 - 実機 vs オフライン参照: `1256832 frames x 2 ch / max diff = 0e0 / diff rms = 0e0`（**ビット一致**）
-- パネル: ウィンドウが表示され、ノブ 3 個・3 バンドメーター・ステータス・BYPASS が
-  正しく描画されることをスクリーンショットで確認
+- パネル: ウィンドウが表示され、入力 VU 2 本・縦フェーダー 3 本・GR / 3 バンド
+  メーター・ステータス・BYPASS が正しく描画されることをスクリーンショットで確認
+- エンジン生成の検証: `activate` を一時的に無効化しても、`create` 時点で ORT が
+  読み込まれ `status:` 行が出て、実機 vs オフライン参照がビット一致することを確認
+  （= 後からフィルタを追加したケースでも動く）
 - 自動テスト: `cargo test --release --lib` → **15 passed / 0 failed**
 - OBS は WM_CLOSE で正常終了し、`user.ini` は検証前の状態へ復元された

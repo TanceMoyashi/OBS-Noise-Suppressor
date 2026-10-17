@@ -532,5 +532,5 @@ Write-Host "   インストール先: $Dest" -ForegroundColor Cyan
 Write-Host "   OBS を起動し、音声ソースの「フィルタ」から" -ForegroundColor Cyan
 Write-Host "     OBS Noise Suppressor" -ForegroundColor Cyan
 Write-Host "   を追加してください。プロパティの" -ForegroundColor Cyan
-Write-Host "     「パネルを開く (ノブ / メーター)」" -ForegroundColor Cyan
+Write-Host "     「パネルを開く (フェーダー / メーター)」" -ForegroundColor Cyan
 Write-Host "   ボタンで UI が開きます。" -ForegroundColor Cyan

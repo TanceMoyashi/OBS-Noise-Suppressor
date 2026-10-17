@@ -1,13 +1,13 @@
 //! 自前 Win32 パネル（GDI + DIB 描画）。
 //!
 //! 旧 VST3 版の `DPDFNetVoiceEditor`（JUCE）を Rust + 生 Win32 で描き直したもの。
-//! 見た目はできるだけ同じにしてある:
+//! トーン（暗い縦グラデ背景 + 上端の淡いアクセントグロー）は引き継いでいる。
 //!
-//!   * 暗い縦グラデ背景 + 上端の淡いアクセントグロー
 //!   * ヘッダ（タイトル + サブタイトル + 区切り線）
-//!   * LOW / MID / HIGH の 3 バンドメータ（アクセント→暖色のグラデ + ピークホールド）
-//!   * ノブ 3 つ（外周トラック / 値アーク / 本体のグラデ / インジケータ）
-//!   * ステータスドット + テキスト、BYPASS のピル型トグル
+//!   * INPUT   : 入力 L / R のアナログ VU メーター（針 + VU 目盛り、300 ms 特性）
+//!   * CONTROL : 縦フェーダー 3 本（AMBIENCE / VOICE / REVERB）
+//!   * EFFECT  : GR メーター（コンプの GR と同じく 0 から下へ振れる）+ 出力 3 バンド
+//!   * ステータスドット + テキスト、有効 / 無効のピル型トグル
 //!
 //! ## スレッドモデル
 //!
@@ -18,7 +18,7 @@
 //! なったら触らない。
 //!
 //! 描画は「DIB セクションに描いて `BitBlt`」方式。グラデーションはピクセルを
-//! 直接書き、枠・文字・円弧は GDI に任せる。
+//! 直接書き、枠・文字・針は GDI に任せる。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -28,7 +28,7 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection, CreateFontW, CreatePen, DeleteDC,
-    DeleteObject, DrawTextW, Ellipse, EndPaint, ExtCreatePen, GetStockObject,
+    DeleteObject, DrawTextW, EndPaint, ExtCreatePen, GetStockObject,
     InvalidateRect, LineTo, MoveToEx, RoundRect, ScreenToClient,
     SelectObject, SetBkMode, SetTextColor, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BS_SOLID,
     CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS, DRAW_TEXT_FORMAT,
@@ -73,7 +73,7 @@ const ACCENT2: u32 = 0x86ecdc;
 const WARM: u32 = 0xe0a24b;
 
 // --------------------------------------------------------------------------
-// レイアウト（PluginEditor.cpp の resized() と同じ寸法。論理ピクセル）
+// レイアウト（論理ピクセル）
 // --------------------------------------------------------------------------
 
 const K_RADIUS: f32 = 10.0;
@@ -81,23 +81,49 @@ const K_MARGIN: f32 = 22.0;
 const K_GAP: f32 = 8.0;
 const K_HEADER_H: f32 = 44.0;
 const K_FOOTER_H: f32 = 36.0;
-const K_METER_H: f32 = 46.0;
-const K_METER_GAP: f32 = 5.0;
-const K_METER_LABEL_W: f32 = 40.0;
-const K_KNOB_LABEL_H: f32 = 18.0;
-const K_VALUE_H: f32 = 18.0;
-const K_CELL_PAD_X: f32 = 14.0;
-const K_CELL_PAD_Y: f32 = 2.0;
+
+/// 各セクションの見出し（INPUT / CONTROL / EFFECT）の高さ。
+const K_SECTION_TITLE_H: f32 = 16.0;
+/// セクション同士の横間隔。
+const K_SECTION_GAP: f32 = 12.0;
+/// 左（入力 VU）セクションの幅。残りを CONTROL / EFFECT で分ける。
+const K_INPUT_W: f32 = 296.0;
+const K_CONTROL_W: f32 = 256.0;
+
+/// 入力 VU メーター 2 本の縦間隔。
+const K_VU_GAP: f32 = 8.0;
+
+/// フェーダー 1 本ぶん。
+const K_FADER_LABEL_H: f32 = 16.0;
+const K_FADER_VALUE_H: f32 = 16.0;
+const K_FADER_TRACK_W: f32 = 8.0;
+const K_FADER_HANDLE_W: f32 = 26.0;
+const K_FADER_HANDLE_H: f32 = 13.0;
+
+/// GR メーター（縦・0 から下へ振れるコンプの GR 風）。
+const K_GR_BAR_W: f32 = 18.0;
+const K_GR_SCALE_W: f32 = 26.0;
+
+/// 3 バンド（低 / 中 / 高）バー。
+const K_BAND_W: f32 = 10.0;
+const K_BAND_GAP: f32 = 6.0;
+const K_BAND_LABEL_H: f32 = 14.0;
+
 const K_BUTTON_W: f32 = 104.0;
 const K_BUTTON_H: f32 = 30.0;
 
-const CLIENT_W: f32 = 620.0;
-const CLIENT_H: f32 = 340.0;
+const CLIENT_W: f32 = 720.0;
+const CLIENT_H: f32 = 380.0;
 
-/// ノブの回転範囲。JUCE の `getRotaryParameters()` と同じ
-/// （0° = 12 時、時計回り、216° から 288° ぶん）。
-const ROTARY_START: f32 = 216.0;
-const ROTARY_SWEEP: f32 = 288.0;
+/// 入力 VU の表示範囲（dBFS）と針の振れ角（度、0 = 真上）。
+/// 0 VU = -18 dBFS とし、-20 VU (-38 dBFS) 〜 +3 VU (-15 dBFS) を出す。
+const VU_DBFS_AT_MIN: f32 = -38.0;
+const VU_DBFS_AT_MAX: f32 = -15.0;
+const VU_ANGLE_MIN: f32 = -55.0;
+const VU_ANGLE_MAX: f32 = 55.0;
+
+/// GR メーターの振れ幅（0 〜 -30 dB）。
+const GR_DB_RANGE: f32 = 30.0;
 
 /// リペイント間隔 (ms)。JUCE 版の `startTimerHz(24)` に合わせる。
 const TIMER_MS: u32 = 40;
@@ -470,9 +496,6 @@ impl IR {
     fn cy(&self) -> i32 {
         (self.t + self.b) / 2
     }
-    fn inset(&self, x: i32, y: i32) -> IR {
-        IR { l: self.l + x, t: self.t + y, r: self.r - x, b: self.b - y }
-    }
     fn top(&self, h: i32) -> IR {
         IR { b: self.t + h, ..*self }
     }
@@ -491,6 +514,29 @@ fn rms_to_display(rms: f32) -> f32 {
     let v = rms.max(1.0e-6) as f64;
     let db = 20.0 * v.log10();
     ((db + 60.0) / 60.0).clamp(0.0, 1.0) as f32
+}
+
+/// 線形 RMS -> VU の針位置 0..1。
+///
+/// 0 VU = -18 dBFS とし、-20 VU (-38 dBFS) 〜 +3 VU (-15 dBFS) を表示する。
+fn vu_to_pos(rms: f32) -> f32 {
+    if !(rms > 0.0) {
+        return 0.0;
+    }
+    let db = 20.0 * rms.log10();
+    ((db - VU_DBFS_AT_MIN) / (VU_DBFS_AT_MAX - VU_DBFS_AT_MIN)).clamp(0.0, 1.0)
+}
+
+/// 入力 / 出力 RMS -> GR メーターの振れ 0..1（抑圧量 [dB] / 30）。
+///
+/// 帰還量が読めない（無音）ときは 0。VOICE で持ち上げて出力の方が大きい場合も 0。
+fn gr_to_display(in_rms: f32, out_rms: f32) -> f32 {
+    const FLOOR: f32 = 1.0e-5;
+    if !(in_rms > FLOOR) || !(out_rms > 0.0) {
+        return 0.0;
+    }
+    let db = 20.0 * (out_rms / in_rms).log10();
+    (-db / GR_DB_RANGE).clamp(0.0, 1.0)
 }
 
 #[inline]
@@ -539,10 +585,10 @@ fn inside_round_rect(x: i32, y: i32, r: IR, rad: i32) -> bool {
 }
 
 // --------------------------------------------------------------------------
-// ノブ定義
+// フェーダー定義
 // --------------------------------------------------------------------------
 
-struct KnobSpec {
+struct FaderSpec {
     name: &'static str,
     min: f32,
     max: f32,
@@ -550,22 +596,22 @@ struct KnobSpec {
     percent: bool,
 }
 
-const KNOBS: [KnobSpec; 3] = [
-    KnobSpec {
+const FADERS: [FaderSpec; 3] = [
+    FaderSpec {
         name: "AMBIENCE",
         min: dsp::AMBIENCE_MIN as f32,
         max: dsp::AMBIENCE_MAX as f32,
         default: dsp::AMBIENCE_DEFAULT as f32,
         percent: true,
     },
-    KnobSpec {
+    FaderSpec {
         name: "VOICE",
         min: dsp::VOICE_MIN as f32,
         max: dsp::VOICE_MAX as f32,
         default: dsp::VOICE_DEFAULT as f32,
         percent: false,
     },
-    KnobSpec {
+    FaderSpec {
         name: "REVERB",
         min: dsp::VOICE_REVERB_MIN as f32,
         max: dsp::VOICE_REVERB_MAX as f32,
@@ -577,12 +623,25 @@ const KNOBS: [KnobSpec; 3] = [
 #[derive(Clone, Copy, Debug, Default)]
 struct Layout {
     title: IR,
-    meter: IR,
     status: IR,
     button: IR,
-    knob: [IR; 3],
-    value: [IR; 3],
+
+    /// セクション見出し（INPUT / CONTROL / EFFECT）を描く帯。
+    section: [IR; 3],
+    /// 入力 VU（左 = ch0 / 右 = ch1）。
+    vu: [IR; 2],
+    /// フェーダーの当たり判定（ラベル・値表示を含む柱）。
+    fader: [IR; 3],
+    /// フェーダーのトラック（つまみが動く範囲）。
+    fader_track: [IR; 3],
     label: [IR; 3],
+    value: [IR; 3],
+    /// GR バー本体と目盛り。
+    gr: IR,
+    gr_scale: IR,
+    /// 3 バンドバー（低 / 中 / 高）とラベル。
+    bands: IR,
+    bands_label: IR,
 }
 
 // --------------------------------------------------------------------------
@@ -719,40 +778,16 @@ impl Dib {
         }
     }
 
-    /// メータ用: 左 accent → 62% で accent2 → 右 warm
-    /// （JUCE の `ColourGradient` + `addColour(0.62, accent2)` と同じ）。
-    fn fill_round_rect_hgrad(&mut self, r: IR, rad: i32, c0: u32, c1: u32, c2: u32) {
-        let span = (r.w() - 1).max(1) as f32;
+    /// 縦バー用: 上 `top` → 下 `bottom` の縦グラデ（角丸）。
+    fn fill_round_rect_vgrad(&mut self, r: IR, rad: i32, top: u32, bottom: u32) {
+        let span = (r.h() - 1).max(1) as f32;
         for y in r.t.max(0)..r.b.min(self.h) {
-            for x in r.l.max(0)..r.r.min(self.w) {
-                if !inside_round_rect(x, y, r, rad) {
-                    continue;
-                }
-                let t = (x - r.l) as f32 / span;
-                let c = if t < 0.62 {
-                    lerp_rgb(c0, c1, t / 0.62)
-                } else {
-                    lerp_rgb(c1, c2, (t - 0.62) / 0.38)
-                };
-                self.put(x, y, c);
-            }
-        }
-    }
-
-    /// ノブ本体用: 上から下への縦グラデ。
-    fn fill_ellipse_vgrad(&mut self, cx: i32, cy: i32, r: f32, top: u32, bottom: u32) {
-        let r2 = r * r;
-        let y0 = ((cy as f32 - r).floor() as i32).max(0);
-        let y1 = ((cy as f32 + r).ceil() as i32).min(self.h);
-        for y in y0..y1 {
-            let dy = y as f32 + 0.5 - cy as f32;
-            let t = ((dy + r) / (2.0 * r)).clamp(0.0, 1.0);
+            let t = (y - r.t) as f32 / span;
             let c = lerp_rgb(top, bottom, t);
-            let half = (r2 - dy * dy).max(0.0).sqrt();
-            let x0 = ((cx as f32 - half).floor() as i32).max(0);
-            let x1 = ((cx as f32 + half).ceil() as i32).min(self.w);
-            for x in x0..x1 {
-                self.put(x, y, c);
+            for x in r.l.max(0)..r.r.min(self.w) {
+                if inside_round_rect(x, y, r, rad) {
+                    self.put(x, y, c);
+                }
             }
         }
     }
@@ -786,9 +821,7 @@ impl Drop for Dib {
 // --------------------------------------------------------------------------
 
 struct Drag {
-    knob: usize,
-    start_y: i32,
-    start_value: f32,
+    fader: usize,
 }
 
 /// 描画に必要な値を `self` から先に取り出しておくための束
@@ -796,16 +829,24 @@ struct Drag {
 struct Snapshot {
     scale: f32,
     layout: Layout,
-    meter: [f32; 3],
-    peak: [f32; 3],
+    /// 入力 VU の針位置 0..1（ch ごと）。
+    vu: [f32; 2],
+    /// GR の振れ 0..1（0 = 抑圧なし / 1 = -30 dB）。
+    gr: f32,
+    /// 出力 3 バンドの表示値 0..1。
+    bands: [f32; 3],
+    bands_peak: [f32; 3],
     status: u32,
     status_text: String,
     summary: String,
     values: [f32; 3],
     dereverb: bool,
+    /// エンジンのチャンネル数（1 = モノラル / 2 = ステレオ / 0 = 未構築）。
+    channels: usize,
     enabled: bool,
     hover_button: bool,
     press_button: bool,
+    hover_fader: Option<usize>,
 }
 
 struct Panel {
@@ -816,14 +857,18 @@ struct Panel {
     dib: Option<Dib>,
     fonts: Option<Fonts>,
     layout: Layout,
-    meter_display: [f32; 3],
-    meter_peak: [f32; 3],
+    /// 入力 VU の針（ボールistics を掛けた現在位置）。
+    vu_display: [f32; 2],
+    /// GR メーターの現在の振れ。
+    gr_display: f32,
+    bands_display: [f32; 3],
+    bands_peak: [f32; 3],
     drag: Option<Drag>,
-    /// ドラッグ中に触ったノブ（離したときに OBS 設定へ書き戻す）。
+    /// ドラッグ中に触ったフェーダー（離したときに OBS 設定へ書き戻す）。
     pending_push: Option<usize>,
     hover_button: bool,
     press_button: bool,
-    hover_knob: Option<usize>,
+    hover_fader: Option<usize>,
 }
 
 impl Panel {
@@ -836,13 +881,15 @@ impl Panel {
             dib: None,
             fonts: None,
             layout: Layout::default(),
-            meter_display: [0.0; 3],
-            meter_peak: [0.0; 3],
+            vu_display: [0.0; 2],
+            gr_display: 0.0,
+            bands_display: [0.0; 3],
+            bands_peak: [0.0; 3],
             drag: None,
             pending_push: None,
             hover_button: false,
             press_button: false,
-            hover_knob: None,
+            hover_fader: None,
         }
     }
 
@@ -928,13 +975,43 @@ impl Panel {
     }
 
     fn on_timer(&mut self) {
+        // ---- 入力 VU（針） ----
+        // VU は平均値メーターなので、立ち上がりも戻りもゆっくり (300 ms 特性)。
+        const VU_K: f32 = 0.32;
+        for ch in 0..2 {
+            let target = vu_to_pos(self.shared.meters.in_level(ch));
+            let cur = &mut self.vu_display[ch];
+            *cur += (target - *cur) * VU_K;
+        }
+
+        // ---- GR（入力 - 出力） ----
+        // コンプの GR と同じで、掛かりは即時・戻りはゆっくり。
+        let in_lv = self
+            .shared
+            .meters
+            .in_level(0)
+            .max(self.shared.meters.in_level(1));
+        let out_lv = self
+            .shared
+            .meters
+            .out_level(0)
+            .max(self.shared.meters.out_level(1));
+        let gr_target = gr_to_display(in_lv, out_lv);
+        if gr_target > self.gr_display {
+            self.gr_display = gr_target;
+        } else {
+            self.gr_display += (gr_target - self.gr_display) * 0.10;
+        }
+
+        // ---- 出力 3 バンド ----
         for b in 0..3 {
-            let target = rms_to_display(self.shared.meters.get(0, b).max(self.shared.meters.get(1, b)));
+            let target =
+                rms_to_display(self.shared.meters.get(0, b).max(self.shared.meters.get(1, b)));
 
             // 立ち上がりは即時、戻りは滑らかに（JUCE 版と同じ）。
-            let cur = self.meter_display[b];
-            self.meter_display[b] = if target > cur { target } else { cur + (target - cur) * 0.25 };
-            self.meter_peak[b] = (self.meter_peak[b] - 0.02).max(self.meter_display[b]);
+            let cur = self.bands_display[b];
+            self.bands_display[b] = if target > cur { target } else { cur + (target - cur) * 0.25 };
+            self.bands_peak[b] = (self.bands_peak[b] - 0.02).max(self.bands_display[b]);
         }
 
         unsafe {
@@ -951,8 +1028,10 @@ impl Panel {
             return;
         }
         for i in 0..3 {
-            if hit(&self.layout.knob[i], x, y) && self.knob_enabled(i) {
-                self.drag = Some(Drag { knob: i, start_y: y, start_value: self.knob_value(i) });
+            if hit(&self.layout.fader[i], x, y) && self.fader_enabled(i) {
+                // フェーダーはクリックした位置へ飛ぶ（ミキサーと同じ）。
+                self.drag = Some(Drag { fader: i });
+                self.set_fader_from_y(i, y, false);
                 unsafe {
                     SetCapture(self.hwnd);
                 }
@@ -963,8 +1042,8 @@ impl Panel {
 
     fn on_mouse_dbl(&mut self, x: i32, y: i32) {
         for i in 0..3 {
-            if hit(&self.layout.knob[i], x, y) && self.knob_enabled(i) {
-                self.apply_knob(i, KNOBS[i].default, true);
+            if hit(&self.layout.fader[i], x, y) && self.fader_enabled(i) {
+                self.apply_fader(i, FADERS[i].default, true);
                 return;
             }
         }
@@ -995,20 +1074,20 @@ impl Panel {
 
     fn on_mouse_move(&mut self, x: i32, y: i32) {
         if let Some(d) = &self.drag {
-            let spec = &KNOBS[d.knob];
-            let span = spec.max - spec.min;
-            let delta = (d.start_y - y) as f32 * span / (200.0 * self.scale.max(0.1));
-            let v = (d.start_value + delta).clamp(spec.min, spec.max);
-            let knob = d.knob;
-            self.apply_knob(knob, v, false);
+            let fader = d.fader;
+            self.set_fader_from_y(fader, y, false);
+            // ドラッグ中はつまみを光らせ続ける。
+            if self.hover_fader != Some(fader) {
+                self.hover_fader = Some(fader);
+            }
             return;
         }
 
         let hb = hit(&self.layout.button, x, y);
-        let hk = (0..3).find(|i| hit(&self.layout.knob[*i], x, y) && self.knob_enabled(*i));
-        if hb != self.hover_button || hk != self.hover_knob {
+        let hf = (0..3).find(|i| hit(&self.layout.fader[*i], x, y) && self.fader_enabled(*i));
+        if hb != self.hover_button || hf != self.hover_fader {
             self.hover_button = hb;
-            self.hover_knob = hk;
+            self.hover_fader = hf;
             unsafe {
                 let _ = InvalidateRect(Some(self.hwnd), None, false);
             }
@@ -1022,21 +1101,33 @@ impl Panel {
             let _ = ScreenToClient(self.hwnd, &mut pt);
         }
         for i in 0..3 {
-            if hit(&self.layout.knob[i], pt.x, pt.y) && self.knob_enabled(i) {
-                let span = KNOBS[i].max - KNOBS[i].min;
+            if hit(&self.layout.fader[i], pt.x, pt.y) && self.fader_enabled(i) {
+                let span = FADERS[i].max - FADERS[i].min;
                 let step = span * 0.02 * (delta as f32 / 120.0);
-                let v = (self.knob_value(i) + step).clamp(KNOBS[i].min, KNOBS[i].max);
-                self.apply_knob(i, v, true);
+                let v = (self.fader_value(i) + step).clamp(FADERS[i].min, FADERS[i].max);
+                self.apply_fader(i, v, true);
                 return;
             }
         }
+    }
+
+    /// フェーダーのトラック上の y から値を決める（クリック / ドラッグ共用）。
+    fn set_fader_from_y(&mut self, i: usize, y: i32, push: bool) {
+        let tr = self.layout.fader_track[i];
+        let hh = self.sc(K_FADER_HANDLE_H);
+        let travel = (tr.h() - hh).max(1) as f32;
+        let top = (tr.t + hh / 2) as f32;
+        let t = (1.0 - (y as f32 - top) / travel).clamp(0.0, 1.0);
+
+        let spec = &FADERS[i];
+        self.apply_fader(i, spec.min + t * (spec.max - spec.min), push);
     }
 
     // ----------------------------------------------------------------------
     // パラメータ
     // ----------------------------------------------------------------------
 
-    fn knob_value(&self, i: usize) -> f32 {
+    fn fader_value(&self, i: usize) -> f32 {
         match i {
             0 => self.shared.params.ambient(),
             1 => self.shared.params.voice(),
@@ -1044,12 +1135,12 @@ impl Panel {
         }
     }
 
-    fn knob_enabled(&self, i: usize) -> bool {
+    fn fader_enabled(&self, i: usize) -> bool {
         // REVERB は 2 出力モデルのときだけ有効（JUCE 版と同じ）。
         i != 2 || self.shared.dereverb.load(Ordering::Relaxed)
     }
 
-    fn apply_knob(&mut self, i: usize, v: f32, push: bool) {
+    fn apply_fader(&mut self, i: usize, v: f32, push: bool) {
         match i {
             0 => self.shared.params.set_ambience(v),
             1 => self.shared.params.set_voice(v),
@@ -1127,24 +1218,103 @@ impl Panel {
         // `removeFromBottom` と同じく、フッタぶんを消費する。
         area.b -= self.sc(K_FOOTER_H) + self.sc(K_GAP);
 
-        out.meter = area.bottom(self.sc(K_METER_H));
-        area.b -= self.sc(K_METER_H) + self.sc(K_GAP);
+        // ---- 横を 3 セクションに分ける（INPUT / CONTROL / EFFECT） ----
+        let gap = self.sc(K_SECTION_GAP);
+        let input = IR { r: area.l + self.sc(K_INPUT_W), ..area };
+        let control = IR {
+            l: input.r + gap,
+            r: input.r + gap + self.sc(K_CONTROL_W),
+            ..area
+        };
+        let effect = IR { l: control.r + gap, ..area };
 
-        let cw = area.w() / 3;
+        let title_h = self.sc(K_SECTION_TITLE_H);
+        out.section[0] = input.top(title_h);
+        out.section[1] = control.top(title_h);
+        out.section[2] = effect.top(title_h);
+
+        // ---- INPUT: 入力 VU 2 本（L が上 / R が下） ----
+        let vu_area = IR { t: input.t + title_h, ..input };
+        let vg = self.sc(K_VU_GAP);
+        let vh = (vu_area.h() - vg) / 2;
+        out.vu[0] = IR { b: vu_area.t + vh, ..vu_area };
+        out.vu[1] = IR {
+            t: vu_area.t + vh + vg,
+            ..vu_area
+        };
+
+        // ---- CONTROL: フェーダー 3 本 ----
+        let ctrl_area = IR {
+            t: control.t + title_h,
+            ..control
+        };
+        let cw = ctrl_area.w() / 3;
+        let fader_hh = self.sc(K_FADER_HANDLE_H);
         for i in 0..3usize {
             let cell = IR {
-                l: area.l + cw * i as i32,
-                t: area.t,
-                r: area.l + cw * (i as i32 + 1),
-                b: area.b,
-            }
-            .inset(self.sc(K_CELL_PAD_X), self.sc(K_CELL_PAD_Y));
-
-            out.label[i] = cell.top(self.sc(K_KNOB_LABEL_H));
-            let body = IR { t: cell.t + self.sc(K_KNOB_LABEL_H), ..cell };
-            out.value[i] = body.bottom(self.sc(K_VALUE_H));
-            out.knob[i] = IR { b: body.b - self.sc(K_VALUE_H), ..body }.inset(self.sc(3.0), self.sc(3.0));
+                l: ctrl_area.l + cw * i as i32,
+                t: ctrl_area.t,
+                r: ctrl_area.l + cw * (i as i32 + 1),
+                b: ctrl_area.b,
+            };
+            out.label[i] = cell.top(self.sc(K_FADER_LABEL_H));
+            out.value[i] = IR {
+                t: out.label[i].b,
+                b: out.label[i].b + self.sc(K_FADER_VALUE_H),
+                ..cell
+            };
+            // つまみが上下にはみ出さないよう、トラックを内側に寄せる。
+            out.fader_track[i] = IR {
+                t: out.value[i].b + self.sc(4.0) + fader_hh / 2,
+                b: cell.b - fader_hh / 2,
+                ..cell
+            };
+            // 当たり判定は値表示より下の柱ぜんぶ（ミキサーのストリップ風）。
+            out.fader[i] = IR {
+                t: out.value[i].b,
+                ..cell
+            };
         }
+
+        // ---- EFFECT: GR（縦・0 から下へ）+ 3 バンド ----
+        let fx = IR {
+            t: effect.t + title_h,
+            ..effect
+        };
+        let gr_bar_w = self.sc(K_GR_BAR_W);
+        let gr_scale_w = self.sc(K_GR_SCALE_W);
+        let band_w = self.sc(K_BAND_W) * 3 + self.sc(K_BAND_GAP) * 2;
+        let total = gr_bar_w + gr_scale_w + self.sc(K_GAP) + band_w;
+        let x0 = fx.l + ((fx.w() - total) / 2).max(0);
+
+        let top = fx.t + self.sc(12.0);
+        let band_label_h = self.sc(K_BAND_LABEL_H);
+        let bottom = fx.b - band_label_h;
+
+        out.gr = IR {
+            l: x0,
+            t: top,
+            r: x0 + gr_bar_w,
+            b: bottom,
+        };
+        out.gr_scale = IR {
+            l: out.gr.r,
+            r: out.gr.r + gr_scale_w,
+            ..out.gr
+        };
+        let band_l = out.gr_scale.r + self.sc(K_GAP);
+        out.bands = IR {
+            l: band_l,
+            t: top,
+            r: band_l + band_w,
+            b: bottom,
+        };
+        out.bands_label = IR {
+            l: out.bands.l,
+            t: bottom,
+            r: out.bands.r,
+            b: fx.b,
+        };
 
         out
     }
@@ -1153,13 +1323,16 @@ impl Panel {
         Snapshot {
             scale: self.scale,
             layout: self.layout,
-            meter: self.meter_display,
-            peak: self.meter_peak,
+            vu: self.vu_display,
+            gr: self.gr_display,
+            bands: self.bands_display,
+            bands_peak: self.bands_peak,
             status: self.shared.status(),
             status_text: self.shared.status_detail(),
             summary: self.shared.summary(),
-            values: [self.knob_value(0), self.knob_value(1), self.knob_value(2)],
+            values: [self.fader_value(0), self.fader_value(1), self.fader_value(2)],
             dereverb: self.shared.dereverb.load(Ordering::Relaxed),
+            channels: self.shared.channels.load(Ordering::Relaxed),
             enabled: if self.shared.alive.load(Ordering::SeqCst) && !self.source.is_null() {
                 unsafe { crate::ffi::obs_source_enabled(self.source as *mut _) }
             } else {
@@ -1167,6 +1340,7 @@ impl Panel {
             },
             hover_button: self.hover_button,
             press_button: self.press_button,
+            hover_fader: self.hover_fader,
         }
     }
 
@@ -1243,53 +1417,70 @@ impl Panel {
                 dim(STROKE, 0.7),
             );
 
-            // ---- 3 バンドメータ ----
-            let mg = sc(K_METER_GAP);
-            let row_h = (lay.meter.h() - 2 * mg) / 3;
-            let lw = sc(K_METER_LABEL_W);
-            let th = row_h.min(sc(10.0)).max(2);
-            let names = ["LOW", "MID", "HIGH"];
-
-            for b in 0..3usize {
-                let row_t = lay.meter.t + b as i32 * (row_h + mg);
-                let row = IR { l: lay.meter.l, t: row_t, r: lay.meter.r, b: row_t + row_h };
-                let lab = IR { r: row.l + lw, ..row };
-                let track = IR { l: row.l + lw, r: row.r, t: row.cy() - th / 2, b: row.cy() + th / 2 };
-
+            // ---- セクション見出し ----
+            let sec_names = ["INPUT", "CONTROL", "EFFECT"];
+            for i in 0..3usize {
+                let r = lay.section[i];
                 draw_text(
                     dc,
-                    names[b],
-                    lab,
+                    sec_names[i],
+                    r,
                     fonts.tiny,
-                    TEXT_DIM,
-                    DT_RIGHT.0 | DT_VCENTER.0 | DT_SINGLELINE.0,
+                    TEXT_FAINT,
+                    DT_LEFT.0 | DT_VCENTER.0 | DT_SINGLELINE.0,
                 );
-
-                dib.fill_round_rect(track, th / 2, SLOT);
-
-                let level = s.meter[b].clamp(0.0, 1.0);
-                if level > 0.002 {
-                    let lit = IR { r: track.l + (track.w() as f32 * level) as i32, ..track };
-                    dib.fill_round_rect_hgrad(lit, th / 2, ACCENT, ACCENT2, WARM);
-                }
-
-                let pk = s.peak[b].clamp(0.0, 1.0);
-                if pk > 0.004 {
-                    let x = track.l + (track.w() as f32 * pk) as i32;
-                    dib.fill_rect_alpha(IR { l: x - 1, r: x + 1, ..track }, TEXT, 0.7);
-                }
-
-                stroke_round_rect(dc, track, th / 2, dim(STROKE, 0.55), 1);
+                let y = r.b - 1;
+                dib.fill_rect(IR { l: r.l, t: y, r: r.r, b: y + 1 }, dim(STROKE, 0.55));
             }
 
-            // ---- ノブ ----
+            // ---- 入力 VU（アナログ針・L / R） ----
+            let n_ch = s.channels.max(1);
+            let vu_names = ["L", "R"];
+            for ch in 0..2usize {
+                paint_vu(
+                    dib,
+                    dc,
+                    fonts,
+                    s.scale,
+                    lay.vu[ch],
+                    s.vu[ch],
+                    vu_names[ch],
+                    ch < n_ch,
+                );
+            }
+
+            // ---- フェーダー 3 本 ----
             for i in 0..3usize {
                 let on = i != 2 || s.dereverb;
-                paint_knob(
-                    dib, dc, fonts, s.scale, lay.knob[i], lay.value[i], lay.label[i], i,
-                    s.values[i], on,
+                paint_fader(
+                    dib,
+                    dc,
+                    fonts,
+                    s.scale,
+                    lay.fader_track[i],
+                    lay.value[i],
+                    lay.label[i],
+                    i,
+                    s.values[i],
+                    on,
+                    s.hover_fader == Some(i),
                 );
             }
+
+            // ---- GR（コンプの GR と同じく 0 から下へ振れる） ----
+            paint_gr(dib, dc, fonts, s.scale, lay.gr, lay.gr_scale, s.gr);
+
+            // ---- 出力 3 バンド（GR の隣に細く） ----
+            paint_bands(
+                dib,
+                dc,
+                fonts,
+                s.scale,
+                lay.bands,
+                lay.bands_label,
+                &s.bands,
+                &s.bands_peak,
+            );
 
             // ---- ステータス ----
             let st = lay.status;
@@ -1345,101 +1536,44 @@ impl Drop for Panel {
 }
 
 // --------------------------------------------------------------------------
-// ノブ描画（PluginEditor.cpp の drawRotarySlider と同じ手順）
+// 描画: 縦フェーダー / 入力 VU / GR / 3 バンド
 // --------------------------------------------------------------------------
 
-unsafe fn paint_knob(
+/// 縦フェーダー。クリックした位置へ飛び、そのままドラッグできる。
+#[allow(clippy::too_many_arguments)]
+unsafe fn paint_fader(
     dib: &mut Dib,
     dc: HDC,
     fonts: &Fonts,
     scale: f32,
-    knob: IR,
+    track: IR,
     value_r: IR,
     label_r: IR,
     index: usize,
     value: f32,
     on: bool,
+    hover: bool,
 ) {
-    let spec = &KNOBS[index];
-    let pos = ((value - spec.min) / (spec.max - spec.min).max(1e-9)).clamp(0.0, 1.0);
+    let spec = &FADERS[index];
+    let span = (spec.max - spec.min).max(1e-9);
+    let pos = ((value - spec.min) / span).clamp(0.0, 1.0);
+    let bipolar = spec.min < 0.0 && spec.max > 0.0;
 
-    let diameter = (knob.w() as f32).min(knob.h() as f32).max(8.0);
-    let radius = diameter * 0.5;
-    let (cx, cy) = (knob.cx() as f32, knob.cy() as f32);
-
-    let line_w = (radius * 0.095).max(3.0 * scale);
-    let arc_r = (radius - line_w * 0.5).max(1.0);
-    let angle = ROTARY_START + pos * ROTARY_SWEEP;
-    let a = if on { 1.0 } else { 0.4 };
-
-    // 外周トラック
-    stroke_arc(
+    // ---- ラベル（上） ----
+    draw_text(
         dc,
-        cx,
-        cy,
-        arc_r,
-        ROTARY_START,
-        ROTARY_START + ROTARY_SWEEP,
-        line_w,
-        dim(TRACK, if on { 1.0 } else { 0.5 }),
+        spec.name,
+        label_r,
+        fonts.label,
+        if on { TEXT_DIM } else { dim(TEXT_DIM, 0.4) },
+        DT_CENTER.0 | DT_VCENTER.0 | DT_SINGLELINE.0,
     );
 
-    // 値のアーク（x 位置で accent -> accent2）
-    if pos > 0.0005 {
-        let n = 28;
-        for k in 0..n {
-            let t0 = k as f32 / n as f32;
-            let t1 = (k + 1) as f32 / n as f32;
-            let a0 = ROTARY_START + (angle - ROTARY_START) * t0;
-            let a1 = ROTARY_START + (angle - ROTARY_START) * t1;
-            let mid = ((a0 + a1) * 0.5).to_radians();
-            let mx = cx + arc_r * mid.sin();
-            let tx = ((mx - (cx - arc_r)) / (2.0 * arc_r)).clamp(0.0, 1.0);
-            stroke_arc(dc, cx, cy, arc_r, a0, a1, line_w, dim(lerp_rgb(ACCENT, ACCENT2, tx), a));
-        }
-    }
-
-    // ノブ本体
-    let body_r = arc_r - line_w * 0.95;
-    if body_r > 3.0 * scale {
-        let d = if on { 1.0 } else { 0.78 };
-        dib.fill_ellipse_vgrad(
-            cx.round() as i32,
-            cy.round() as i32,
-            body_r,
-            dim(0x303a44, d),
-            dim(0x15191e, d),
-        );
-        let br = IR {
-            l: (cx - body_r).round() as i32,
-            t: (cy - body_r).round() as i32,
-            r: (cx + body_r).round() as i32,
-            b: (cy + body_r).round() as i32,
-        };
-        stroke_ellipse(dc, br, dim(0x39424d, if on { 0.85 } else { 0.4 }), 1);
-    }
-
-    // インジケータ
-    {
-        let r_in = body_r * 0.30;
-        let r_out = body_r * 0.84;
-        let (sn, cs) = (angle.to_radians().sin(), angle.to_radians().cos());
-        stroke_line(
-            dc,
-            cx + r_in * sn,
-            cy - r_in * cs,
-            cx + r_out * sn,
-            cy - r_out * cs,
-            (body_r * 0.12).max(2.0 * scale),
-            dim(TEXT, if on { 1.0 } else { 0.35 }),
-        );
-    }
-
-    // 値
+    // ---- 値（ラベルの下） ----
     let text = if spec.percent {
         format!("{} %", (value * 100.0).round() as i32)
     } else {
-        format!("{:.1} dB", value)
+        format!("{value:+.1} dB")
     };
     draw_text(
         dc,
@@ -1450,15 +1584,438 @@ unsafe fn paint_knob(
         DT_CENTER.0 | DT_VCENTER.0 | DT_SINGLELINE.0,
     );
 
-    // ラベル
+    // ---- スロット ----
+    let tw = ((K_FADER_TRACK_W * scale).round() as i32).max(4);
+    let cx = track.cx();
+    let slot = IR {
+        l: cx - tw / 2,
+        r: cx - tw / 2 + tw,
+        t: track.t,
+        b: track.b,
+    };
+    let rad = (tw as f32 * 0.5).round() as i32;
+    dib.fill_round_rect(slot, rad, dim(TRACK, if on { 0.9 } else { 0.5 }));
+    stroke_round_rect(dc, slot, rad, dim(STROKE, if on { 0.9 } else { 0.5 }), 1);
+
+    // ---- 目盛り（スロットの右側） ----
+    let tick_x = slot.r + (4.0 * scale).round() as i32;
+    for k in 0..=4i32 {
+        let t = k as f32 / 4.0;
+        let y = (track.b as f32 - t * track.h() as f32).round() as i32;
+        let major = k % 2 == 0;
+        let len = if major {
+            (8.0 * scale).round() as i32
+        } else {
+            (4.0 * scale).round() as i32
+        };
+        let c = dim(TEXT_FAINT, if major { 0.9 } else { 0.5 });
+        dib.fill_rect(
+            IR {
+                l: tick_x,
+                t: y,
+                r: tick_x + len.max(1),
+                b: y + 1,
+            },
+            c,
+        );
+    }
+
+    // ---- つまみの位置 ----
+    let handle_h = ((K_FADER_HANDLE_H * scale).round() as i32).max(6);
+    let cy = (track.b as f32 - pos * track.h() as f32).round() as i32;
+
+    // ---- 値のぶんだけ塗る（VOICE は中央 = 0 dB から） ----
+    let anchor = if bipolar {
+        (track.b as f32 - ((0.0 - spec.min) / span) * track.h() as f32).round() as i32
+    } else {
+        track.b
+    };
+    let (y0, y1) = (anchor.min(cy), anchor.max(cy));
+    if y1 - y0 > 1 {
+        let fill = IR {
+            l: slot.l,
+            t: y0,
+            r: slot.r,
+            b: y1,
+        };
+        let (c0, c1) = if on {
+            (ACCENT, ACCENT2)
+        } else {
+            (dim(ACCENT, 0.55), dim(ACCENT2, 0.55))
+        };
+        // つまみ側を明るくする。
+        let (ct, cb) = if cy <= anchor { (c1, c0) } else { (c0, c1) };
+        dib.fill_round_rect_vgrad(fill, rad, ct, cb);
+    }
+
+    // 両極性（VOICE）は 0 dB の線を出す。
+    if bipolar {
+        dib.fill_rect(
+            IR {
+                l: slot.l - 2,
+                t: anchor,
+                r: slot.r + 2,
+                b: anchor + 1,
+            },
+            dim(TEXT_FAINT, 0.85),
+        );
+    }
+
+    // ---- つまみ ----
+    let hw = ((K_FADER_HANDLE_W * scale).round() as i32).max(10);
+    let h = IR {
+        l: cx - hw / 2,
+        r: cx - hw / 2 + hw,
+        t: cy - handle_h / 2,
+        b: cy - handle_h / 2 + handle_h,
+    };
+    let hrad = (3.0 * scale).round() as i32;
+    let (ct, cb) = if on {
+        if hover {
+            (0x4e5a6a, 0x242a31)
+        } else {
+            (0x3d4753, 0x1c2127)
+        }
+    } else {
+        (dim(0x3d4753, 0.5), dim(0x1c2127, 0.5))
+    };
+    dib.fill_round_rect_vgrad(h, hrad, ct, cb);
+    stroke_round_rect(dc, h, hrad, dim(0x4e5a6a, if on { 0.9 } else { 0.4 }), 1);
+    // つまみの中央線（ミキサーのフェーダー風）。
+    let ly = h.cy();
+    dib.fill_rect_alpha(
+        IR {
+            l: h.l + (3.0 * scale) as i32,
+            t: ly,
+            r: h.r - (3.0 * scale) as i32,
+            b: ly + 1,
+        },
+        TEXT,
+        if on { 0.5 } else { 0.2 },
+    );
+}
+
+/// 入力レベルをアナログ VU の針で描く。`pos` は 0..1（0 = -20 VU / 1 = +3 VU）。
+#[allow(clippy::too_many_arguments)]
+unsafe fn paint_vu(
+    dib: &mut Dib,
+    dc: HDC,
+    fonts: &Fonts,
+    scale: f32,
+    r: IR,
+    pos: f32,
+    name: &str,
+    on: bool,
+) {
+    let rad = (8.0 * scale).round() as i32;
+
+    // ---- 盤面 ----
+    dib.fill_round_rect(r, rad, dim(SLOT, if on { 1.0 } else { 0.7 }));
+    stroke_round_rect(dc, r, rad, dim(STROKE, if on { 0.95 } else { 0.5 }), 1);
+
+    // 支点は下中央（実機と同じく盤面の下端ぎりぎり）。
+    let px = r.cx() as f32;
+    let py = r.b as f32 - 4.0 * scale;
+    let arc_r = (r.h() as f32 - 20.0 * scale).max(18.0 * scale);
+    let label_r = arc_r - 14.0 * scale;
+
+    // VU 値 -> 角度 [度] / 角度 + 半径 -> 座標。
+    let ang = |vu: f32| -> f32 {
+        let t = ((vu + 20.0) / 23.0).clamp(0.0, 1.0);
+        VU_ANGLE_MIN + t * (VU_ANGLE_MAX - VU_ANGLE_MIN)
+    };
+    let pt = |a: f32, rr: f32| -> (f32, f32) {
+        let rad = a.to_radians();
+        (px + rr * rad.sin(), py - rr * rad.cos())
+    };
+
+    // ---- 目盛り弧 ----
+    stroke_arc(
+        dc,
+        px,
+        py,
+        arc_r,
+        VU_ANGLE_MIN,
+        VU_ANGLE_MAX,
+        (1.4 * scale).max(1.0),
+        dim(TEXT_FAINT, if on { 0.85 } else { 0.4 }),
+    );
+
+    // ---- 目盛り ----
+    // VU の目盛りは 0 付近が細かい（-3 / -2 / -1 / 0 / +1 / +2 / +3）。
+    const VU_TICKS: [f32; 11] = [-20.0, -10.0, -7.0, -5.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0];
+    const VU_LABELS: [i32; 5] = [-20, -10, -5, 0, 3];
+    let tick_c = dim(if on { TEXT_DIM } else { TEXT_FAINT }, if on { 0.9 } else { 0.4 });
+
+    for &v in VU_TICKS.iter() {
+        let a = ang(v);
+        let major = v == -20.0 || v == -10.0 || v == -5.0 || v == 0.0 || v == 3.0;
+        let len = if major { 8.0 * scale } else { 4.5 * scale };
+        let (x0, y0) = pt(a, arc_r);
+        let (x1, y1) = pt(a, arc_r - len);
+        stroke_line(dc, x0, y0, x1, y1, (1.2 * scale).max(1.0), tick_c);
+    }
+
+    for &v in VU_LABELS.iter() {
+        let a = ang(v as f32);
+        let (x, y) = pt(a, label_r - 2.0 * scale);
+        let lr = IR {
+            l: (x - 13.0 * scale).round() as i32,
+            r: (x + 13.0 * scale).round() as i32,
+            t: (y - 5.0 * scale).round() as i32,
+            b: (y + 5.0 * scale).round() as i32,
+        };
+        draw_text(
+            dc,
+            &format!("{v}"),
+            lr,
+            fonts.tiny,
+            dim(TEXT_FAINT, if on { 1.0 } else { 0.4 }),
+            DT_CENTER.0 | DT_VCENTER.0 | DT_SINGLELINE.0,
+        );
+    }
+
+    // ---- 針 ----
+    let a = VU_ANGLE_MIN + pos.clamp(0.0, 1.0) * (VU_ANGLE_MAX - VU_ANGLE_MIN);
+    let (x1, y1) = pt(a, arc_r - 3.0 * scale);
+    stroke_line(
+        dc,
+        px,
+        py,
+        x1,
+        y1,
+        (1.8 * scale).max(1.0),
+        dim(0xe0655a, if on { 1.0 } else { 0.3 }),
+    );
+    dib.fill_ellipse(
+        px.round() as i32,
+        py.round() as i32,
+        (3.0 * scale).max(2.0) as i32,
+        dim(0x39424d, if on { 1.0 } else { 0.5 }),
+    );
+
+    // ---- キャプション（VU / チャンネル名） ----
+    let cap = IR {
+        l: r.l + (8.0 * scale) as i32,
+        t: r.b - (15.0 * scale) as i32,
+        r: r.cx(),
+        b: r.b - (3.0 * scale) as i32,
+    };
     draw_text(
         dc,
-        spec.name,
-        label_r,
+        "VU",
+        cap,
+        fonts.tiny,
+        dim(TEXT_FAINT, if on { 1.0 } else { 0.4 }),
+        DT_LEFT.0 | DT_VCENTER.0 | DT_SINGLELINE.0,
+    );
+
+    let nr = IR {
+        l: r.cx(),
+        t: cap.t,
+        r: r.r - (8.0 * scale) as i32,
+        b: cap.b,
+    };
+    draw_text(
+        dc,
+        name,
+        nr,
         fonts.label,
         if on { TEXT_DIM } else { dim(TEXT_DIM, 0.4) },
+        DT_RIGHT.0 | DT_VCENTER.0 | DT_SINGLELINE.0,
+    );
+}
+
+/// GR（抑圧量）メーター。コンプの GR と同じく 0 の線から下へ伸びる。
+unsafe fn paint_gr(
+    dib: &mut Dib,
+    dc: HDC,
+    fonts: &Fonts,
+    scale: f32,
+    bar: IR,
+    scale_r: IR,
+    amount: f32,
+) {
+    let rad = (4.0 * scale).round() as i32;
+
+    // 見出し
+    let cap = IR {
+        t: bar.t - (11.0 * scale).round() as i32,
+        b: bar.t,
+        ..bar
+    };
+    draw_text(
+        dc,
+        "GR",
+        cap,
+        fonts.tiny,
+        TEXT_FAINT,
         DT_CENTER.0 | DT_VCENTER.0 | DT_SINGLELINE.0,
     );
+
+    // トラック
+    dib.fill_round_rect(bar, rad, SLOT);
+    stroke_round_rect(dc, bar, rad, dim(STROKE, 0.85), 1);
+
+    // 0 dB の基準線
+    dib.fill_rect(
+        IR {
+            l: bar.l - 2,
+            t: bar.t - 1,
+            r: bar.r + 2,
+            b: bar.t + 1,
+        },
+        dim(TEXT_FAINT, 0.9),
+    );
+
+    // 塗り（下へ = 抑圧量）
+    let h = (bar.h() as f32 * amount.clamp(0.0, 1.0)).round() as i32;
+    if h > 1 {
+        let fill = IR {
+            t: bar.t,
+            b: bar.t + h,
+            ..bar
+        };
+        dib.fill_round_rect_vgrad(fill, rad, ACCENT2, WARM);
+    }
+
+    // 目盛り（0 / -6 / -12 / -18 / -24 / -30 dB）
+    const GR_TICKS: [i32; 6] = [0, 6, 12, 18, 24, 30];
+    for &db in GR_TICKS.iter() {
+        let t = db as f32 / GR_DB_RANGE;
+        let y = (bar.t as f32 + t * bar.h() as f32).round() as i32;
+        let major = db % 12 == 0;
+        let len = if major { 7.0 * scale } else { 4.0 * scale };
+        dib.fill_rect(
+            IR {
+                l: bar.r + 1,
+                t: y,
+                r: bar.r + 1 + (len.round() as i32).max(1),
+                b: y + 1,
+            },
+            dim(TEXT_FAINT, if major { 0.85 } else { 0.45 }),
+        );
+        if major {
+            let tr = IR {
+                l: bar.r + (10.0 * scale).round() as i32,
+                r: scale_r.r,
+                t: (y as f32 - 5.0 * scale).round() as i32,
+                b: (y as f32 + 5.0 * scale).round() as i32,
+            };
+            let s = if db == 0 {
+                "0".to_string()
+            } else {
+                format!("-{db}")
+            };
+            draw_text(
+                dc,
+                &s,
+                tr,
+                fonts.tiny,
+                TEXT_FAINT,
+                DT_LEFT.0 | DT_VCENTER.0 | DT_SINGLELINE.0,
+            );
+        }
+    }
+}
+
+/// 出力 3 バンド（低 / 中 / 高）の細い縦バー。
+unsafe fn paint_bands(
+    dib: &mut Dib,
+    dc: HDC,
+    fonts: &Fonts,
+    scale: f32,
+    bars: IR,
+    labels: IR,
+    levels: &[f32; 3],
+    peaks: &[f32; 3],
+) {
+    let bw = ((K_BAND_W * scale).round() as i32).max(4);
+    let gap = ((K_BAND_GAP * scale).round() as i32).max(2);
+    let rad = (bw as f32 * 0.5).round() as i32;
+    let names = ["L", "M", "H"];
+
+    let cap = IR {
+        t: bars.t - (11.0 * scale).round() as i32,
+        b: bars.t,
+        ..bars
+    };
+    draw_text(
+        dc,
+        "OUT",
+        cap,
+        fonts.tiny,
+        TEXT_FAINT,
+        DT_CENTER.0 | DT_VCENTER.0 | DT_SINGLELINE.0,
+    );
+
+    for b in 0..3usize {
+        let l = bars.l + b as i32 * (bw + gap);
+        let r = IR {
+            l,
+            r: l + bw,
+            ..bars
+        };
+        dib.fill_round_rect(r, rad, SLOT);
+        stroke_round_rect(dc, r, rad, dim(STROKE, 0.6), 1);
+
+        let h = (r.h() as f32 * levels[b].clamp(0.0, 1.0)).round() as i32;
+        if h > 1 {
+            let fill = IR {
+                t: r.b - h,
+                ..r
+            };
+            // 下 accent → 上 warm（横向きメーターと同じ配色）。
+            let mid = fill.b - (fill.h() as f32 * 0.62).round() as i32;
+            dib.fill_round_rect_vgrad(
+                IR {
+                    b: mid,
+                    ..fill
+                },
+                rad,
+                ACCENT2,
+                ACCENT,
+            );
+            dib.fill_round_rect_vgrad(
+                IR {
+                    t: mid,
+                    ..fill
+                },
+                rad,
+                WARM,
+                ACCENT2,
+            );
+        }
+
+        let pk = peaks[b].clamp(0.0, 1.0);
+        if pk > 0.004 {
+            let y = r.b - (r.h() as f32 * pk).round() as i32;
+            dib.fill_rect_alpha(
+                IR {
+                    l: r.l,
+                    t: y,
+                    r: r.r,
+                    b: y + 1,
+                },
+                TEXT,
+                0.7,
+            );
+        }
+
+        draw_text(
+            dc,
+            names[b],
+            IR {
+                l: r.l,
+                t: labels.t,
+                r: r.r,
+                b: labels.b,
+            },
+            fonts.tiny,
+            TEXT_DIM,
+            DT_CENTER.0 | DT_VCENTER.0 | DT_SINGLELINE.0,
+        );
+    }
 }
 
 // --------------------------------------------------------------------------
@@ -1572,19 +2129,6 @@ unsafe fn stroke_round_rect(dc: HDC, r: IR, rad: i32, color: u32, width: i32) {
     let _ = DeleteObject(HGDIOBJ(pen.0));
 }
 
-unsafe fn stroke_ellipse(dc: HDC, r: IR, color: u32, width: i32) {
-    let pen = CreatePen(PS_SOLID, width.max(1), COLORREF(colorref(color)));
-    if pen.0.is_null() {
-        return;
-    }
-    let old_pen = SelectObject(dc, HGDIOBJ(pen.0));
-    let old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-    let _ = Ellipse(dc, r.l, r.t, r.r, r.b);
-    SelectObject(dc, old_brush);
-    SelectObject(dc, old_pen);
-    let _ = DeleteObject(HGDIOBJ(pen.0));
-}
-
 // --------------------------------------------------------------------------
 // オフラインの見た目確認（OBS を起動せずパネルを描いて BMP に落とす）
 // --------------------------------------------------------------------------
@@ -1637,7 +2181,13 @@ mod tests {
 
     fn render(scale: f32, path: &std::path::Path) {
         let meters = Arc::new(Meters::new());
-        // それらしいレベル（LOW 強め / MID 中 / HIGH 弱め）。
+        // 入力レベル（アナログ VU 用）。
+        meters.set_in(0, 0.09);
+        meters.set_in(1, 0.055);
+        // 出力レベル（GR 用）。入力より 10 dB 以上下 = 抑圧が効いている状態。
+        meters.set_out(0, 0.022);
+        meters.set_out(1, 0.014);
+        // 出力 3 バンド（LOW 強め / MID 中 / HIGH 弱め）。
         meters.set(0, 0, 0.55);
         meters.set(1, 0, 0.42);
         meters.set(0, 1, 0.18);
@@ -1650,9 +2200,10 @@ mod tests {
         shared.params.set_voice(2.5);
         shared.params.set_voice_reverb(0.28);
         shared.dereverb.store(true, Ordering::Relaxed);
+        shared.channels.store(2, Ordering::Relaxed);
         shared.set_status_detail(
             ST_OK,
-            "48 kHz / ch=2 / latency 2880 samples / dpdfnet2_48khz_hr_2out.onnx | n_fft=960 hop=480 state=56436 outputs=2",
+            "48 kHz / ch=2 / latency 2880 samples / dpdfnet8_48khz_hr_2out.onnx | n_fft=960 hop=480 state=90228 outputs=2",
         );
         shared.set_summary("2 ch  ·  48 kHz  ·  遅延 2880 samples (60 ms)  ·  dereverb あり".into());
 
@@ -1663,24 +2214,29 @@ mod tests {
         panel.dib = Some(unsafe { Dib::new(w, h) }.expect("DIB"));
         panel.fonts = Some(unsafe { Fonts::new(scale) });
         panel.layout = panel.compute_layout(w, h);
-        panel.meter_display = [0.62, 0.30, 0.08];
-        panel.meter_peak = [0.71, 0.36, 0.11];
+        // ボールistics を掛けたあとの値を直接入れて見た目を確認する。
+        panel.vu_display = [vu_to_pos(0.09), vu_to_pos(0.055)];
+        panel.gr_display = gr_to_display(0.09, 0.022);
+        panel.bands_display = [0.62, 0.30, 0.08];
+        panel.bands_peak = [0.71, 0.36, 0.11];
         panel.paint();
 
         let dib = panel.dib.as_ref().unwrap();
         write_bmp(path, w, h, dib.bits);
         eprintln!(
-            "snapshot: {} ({}x{})\n  title={:?}\n  meter={:?}\n  status={:?}\n  button={:?}\n  label={:?}\n  knob={:?}\n  value={:?}",
+            "snapshot: {} ({}x{})\n  title={:?}\n  status={:?}\n  button={:?}\n  section={:?}\n  vu={:?}\n  fader={:?}\n  fader_track={:?}\n  gr={:?}\n  bands={:?}",
             path.display(),
             w,
             h,
             panel.layout.title,
-            panel.layout.meter,
             panel.layout.status,
             panel.layout.button,
-            panel.layout.label,
-            panel.layout.knob,
-            panel.layout.value
+            panel.layout.section,
+            panel.layout.vu,
+            panel.layout.fader,
+            panel.layout.fader_track,
+            panel.layout.gr,
+            panel.layout.bands
         );
     }
 
@@ -1694,30 +2250,28 @@ mod tests {
         render(1.5, &out_dir().join("dpdfnet_panel_150.bmp"));
     }
 
-    /// REVERB 無効（1 出力モデル）+ バイパス中の見た目。
+    /// REVERB 無効（モデル未配置）+ モノラル時の見た目。
     #[test]
     fn snapshot_panel_disabled() {
         let meters = Arc::new(Meters::new());
         meters.set(0, 0, 0.30);
         let shared = Arc::new(Shared::new(meters));
         shared.params.set_ambience(1.0);
+        // モノラル（R 側の VU が休む）も確認する。
+        shared.channels.store(1, Ordering::Relaxed);
         shared.set_status_detail(
             crate::filter::ST_MODEL_NOT_FOUND,
             "DPDFNet モデルが見つかりません (探索先: C:\\ProgramData\\obs-studio\\plugins\\obs_noise_suppressor\\data\\models)",
         );
+        let (w, h) = (CLIENT_W.round() as i32, CLIENT_H.round() as i32);
         let mut panel = Panel::new(Arc::clone(&shared), std::ptr::null_mut(), 1.0);
-        panel.dib = Some(unsafe { Dib::new(620, 340) }.expect("DIB"));
+        panel.dib = Some(unsafe { Dib::new(w, h) }.expect("DIB"));
         panel.fonts = Some(unsafe { Fonts::new(1.0) });
-        panel.layout = panel.compute_layout(620, 340);
-        panel.meter_display = [0.22, 0.0, 0.0];
-        panel.meter_peak = [0.30, 0.0, 0.0];
+        panel.layout = panel.compute_layout(w, h);
+        panel.bands_display = [0.22, 0.0, 0.0];
+        panel.bands_peak = [0.30, 0.0, 0.0];
         panel.paint();
         let dib = panel.dib.as_ref().unwrap();
-        write_bmp(
-            &out_dir().join("dpdfnet_panel_disabled.bmp"),
-            620,
-            340,
-            dib.bits,
-        );
+        write_bmp(&out_dir().join("dpdfnet_panel_disabled.bmp"), w, h, dib.bits);
     }
 }
