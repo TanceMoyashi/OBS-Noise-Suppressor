@@ -7,6 +7,12 @@
 # PowerShell は LF でも動くが、揃えておく。
 *.ps1 text eol=crlf
 
+# Markdown は LF のまま (core.autocrlf=true でも LF でチェックアウトさせ、
+# 「LF will be replaced by CRLF」の警告を出さない)。
+*.md text eol=lf
+.gitattributes text eol=lf
+.gitignore text eol=lf
+
 # バイナリ (改行変換・差分の対象外)
 *.onnx binary
 *.dll binary

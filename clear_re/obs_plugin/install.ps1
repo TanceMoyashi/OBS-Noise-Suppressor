@@ -13,17 +13,21 @@
     (obs-studio のソース frontend/widgets/OBSBasic.cpp の AddExtraModulePaths と
      libobs/obs-windows.c の add_default_module_paths で確認済み)
 
-    だから既定のインストール先はエディションに依存せず、管理者権限も
-    レジストリも使いません (Microsoft Store 版も非ポータブルなので同じ場所を
-    読みます)。
+    だから既定のインストール先はエディションに依存せず、レジストリも使いません。
+    ふつうは管理者権限も不要です。
 
-    例外はポータブル版で、こちらは %ProgramData% を読みません。検出できた
-    ポータブル版と -Obs で指定されたフォルダには、OBS の既定の相対パス
+    例外は 2 つ:
 
-        <OBS ルート>\obs-plugins\64bit\obs_noise_suppressor.dll
-        <OBS ルート>\data\obs-plugins\obs_noise_suppressor\
+      * ポータブル版 … %ProgramData% を読まないので、検出できたポータブル版と
+        -Obs で指定されたフォルダには OBS 側の既定の相対パス
 
-    にもコピーします。
+            <OBS ルート>\obs-plugins\64bit\obs_noise_suppressor.dll
+            <OBS ルート>\data\obs-plugins\obs_noise_suppressor\
+
+        にもコピーします。
+      * 前回「管理者として」インストールしていた場合 … ProgramData のファイルが
+        Administrators 所有になり、非昇格では上書きできません。この場合は
+        自動で自分自身を管理者として起動し直します (-NoElevate で抑止)。
 
     このスクリプトは 2 通りの使われ方をします:
 
@@ -57,6 +61,9 @@
 .PARAMETER NoDetect
     OBS の検出と、ポータブル版への追加配置をしない。
 
+.PARAMETER NoElevate
+    書き込めないときに管理者として起動し直さない (メッセージだけ出す)。
+
 .PARAMETER Force
     OBS が起動中でも強行する。
 
@@ -76,6 +83,7 @@ param(
     [switch]$SkipBuild,
     [switch]$SkipModels,
     [switch]$NoDetect,
+    [switch]$NoElevate,
     [switch]$Force
 )
 
@@ -91,6 +99,86 @@ function Write-Head([string]$t) { Write-Host ""; Write-Host "== $t" -ForegroundC
 function Write-Ok([string]$t) { Write-Host "   [OK] $t" -ForegroundColor Green }
 function Write-Skip([string]$t) { Write-Host "   [--] $t" -ForegroundColor DarkGray }
 function Write-Warn2([string]$t) { Write-Host "   [!!] $t" -ForegroundColor Yellow }
+
+# --------------------------------------------------------------------------
+# 権限まわり
+# --------------------------------------------------------------------------
+function Test-IsAdmin {
+    try {
+        $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+        return (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch { return $false }
+}
+
+# 「既存のファイルを上書きできるか」。ProgramData のプラグインファイルは
+# 作成したユーザーにしか書き込み権をくれない (Users は RX だけ) ので、
+# 管理者が作ったファイルは非昇格では上書きできない。
+function Test-FileWritable([string]$Path) {
+    try {
+        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        $fs.Close()
+        return $true
+    } catch { return $false }
+}
+
+# まだ配置されていないときに、そのフォルダへ新規作成できるか。
+function Test-DirCreatable([string]$Dir) {
+    $probe = Join-Path $Dir (".obsns_probe_{0}" -f $PID)
+    try {
+        [System.IO.File]::WriteAllText($probe, "probe")
+        return $true
+    } catch { return $false }
+    finally {
+        if (Test-Path -LiteralPath $probe) {
+            Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Initialize-Dest([string]$Dir) {
+    $bin = Join-Path $Dir "bin\64bit"
+    $data = Join-Path $Dir "data"
+    try {
+        New-Item -ItemType Directory -Force -Path $bin, (Join-Path $data "models") -ErrorAction Stop |
+            Out-Null
+    } catch { return $false }
+
+    $dll = Join-Path $bin "$ModuleName.dll"
+    if (Test-Path -LiteralPath $dll) { return (Test-FileWritable $dll) }
+    return (Test-DirCreatable $bin)
+}
+
+# 自分自身を管理者として起動し直す。UAC が「通知しない」設定なら無言で昇格する。
+# 関数の中の $PSBoundParameters は「関数自身」のもので空なので、スクリプトの
+# 束縛済みパラメータは呼び出し側から -Bound で渡してもらう。
+function Invoke-ElevatedSelf {
+    param([System.Collections.IDictionary]$Bound)
+    $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ('"{0}"' -f $PSCommandPath))
+    foreach ($k in $Bound.Keys) {
+        if ($k -eq "NoElevate") { continue }
+        $v = $Bound[$k]
+        if ($v -is [switch]) {
+            if ($v.IsPresent) { $argList += "-$k" }
+        } elseif ($v -is [System.Array]) {
+            foreach ($x in $v) { $argList += @("-$k", ('"{0}"' -f $x)) }
+        } else {
+            $argList += @("-$k", ('"{0}"' -f $v))
+        }
+    }
+    Write-Host ("   powershell.exe " + ($argList -join " ")) -ForegroundColor DarkGray
+    try {
+        $p = Start-Process -FilePath "powershell.exe" -ArgumentList $argList `
+            -Verb RunAs -Wait -PassThru
+        return $p.ExitCode
+    } catch {
+        Write-Warn2 "昇格できませんでした: $($_.Exception.Message)"
+        Write-Warn2 "  管理者として実行し直すか、install.bat を右クリック →"
+        Write-Warn2 "  「管理者として実行」してください。"
+        return 1
+    }
+}
 
 # --------------------------------------------------------------------------
 # OBS の検出
@@ -150,7 +238,7 @@ function Test-PortableObs([string]$Root) {
 }
 
 # --------------------------------------------------------------------------
-# ヘルパ
+# ペイロード / 配置
 # --------------------------------------------------------------------------
 function Resolve-OrtDll {
     param([string]$Explicit)
@@ -171,7 +259,7 @@ function Resolve-OrtDll {
     $dirs.Add($root)
     $docs = [Environment]::GetFolderPath("MyDocuments")
     if ($docs) { $dirs.Add((Join-Path $docs "OBS\VST3\DPDFNet Voice.vst3\Contents\x86_64-win")) }
-    $dirs.Add((Join-Path ${env:ProgramFiles} "obs-studio\obs-plugins\64bit"))
+    if ($env:ProgramFiles) { $dirs.Add((Join-Path $env:ProgramFiles "obs-studio\obs-plugins\64bit")) }
 
     foreach ($d in $dirs) {
         if (-not (Test-Path -LiteralPath $d -PathType Container)) { continue }
@@ -211,9 +299,9 @@ function Install-InPlace([string]$ObsRoot) {
     }
 }
 
-# --------------------------------------------------------------------------
+# ==========================================================================
 # 0) 形態の判定と OBS の起動チェック
-# --------------------------------------------------------------------------
+# ==========================================================================
 $pkgDll = Join-Path $root "bin\64bit\$ModuleName.dll"
 $Packaged = Test-Path -LiteralPath $pkgDll
 
@@ -232,20 +320,43 @@ if ($running.Count -gt 0) {
     Write-Warn2 "OBS が起動中ですが -Force が指定されたので強行します。"
 }
 
-# --------------------------------------------------------------------------
-# 1) ペイロード (コピー元) を用意する
-# --------------------------------------------------------------------------
-$Payload = Join-Path $root "bin\64bit"    # dll のあるフォルダ
-$PayloadData = Join-Path $root "data"     # models / ORT / manifest のあるフォルダ
+# ==========================================================================
+# 1) 配置先を決めて、書き込めるか確認する (必要なら昇格し直す)
+# ==========================================================================
+if (-not $Dest) { $Dest = Join-Path $env:ProgramData "obs-studio\plugins\$ModuleName" }
+
+Write-Head "配置先"
+Write-Host "   $Dest"
+
+if (-not (Initialize-Dest $Dest)) {
+    if (-not $NoElevate -and -not (Test-IsAdmin)) {
+        Write-Warn2 "ここに書き込めません (前回「管理者として」インストールした可能性があります)。"
+        Write-Warn2 "管理者として実行し直します..."
+        exit (Invoke-ElevatedSelf -Bound $PSBoundParameters)
+    }
+    throw @"
+書き込めません: $Dest
+
+  OBS を終了してから再実行するか、管理者として実行してください。
+  (install.bat を右クリック → 「管理者として実行」)
+"@
+}
+
+# ==========================================================================
+# 2) ペイロード (コピー元) を用意する
+# ==========================================================================
+$Payload = Join-Path $root "bin\64bit"
+$PayloadData = Join-Path $root "data"
+$staging = Join-Path $root "payload_tmp"
 
 if ($Packaged) {
+    Write-Host "   ペイロード: $root"
     if (-not (Test-Path -LiteralPath (Join-Path $PayloadData "dpdfnet_onnxruntime.dll"))) {
         throw "同梱の ONNX Runtime がありません: $(Join-Path $PayloadData 'dpdfnet_onnxruntime.dll')"
     }
     if (-not (Test-Path -Path (Join-Path $PayloadData "models\*.onnx"))) {
         throw "同梱のモデルがありません: $(Join-Path $PayloadData 'models')"
     }
-    Write-Host "   ペイロード: $root"
 } else {
     Write-Head "ビルド"
     $built = Join-Path $root "target\$($Configuration.ToLower())\$ModuleName.dll"
@@ -257,10 +368,10 @@ if ($Packaged) {
     }
     Write-Ok $built
 
-    $Payload = Join-Path $root "payload_tmp\bin\64bit"
-    $PayloadData = Join-Path $root "payload_tmp\data"
-    if (Test-Path -LiteralPath (Join-Path $root "payload_tmp")) {
-        Remove-Item -LiteralPath (Join-Path $root "payload_tmp") -Recurse -Force
+    $Payload = Join-Path $staging "bin\64bit"
+    $PayloadData = Join-Path $staging "data"
+    if (Test-Path -LiteralPath $staging) {
+        Remove-Item -LiteralPath $staging -Recurse -Force
     }
     New-Item -ItemType Directory -Force -Path $Payload, (Join-Path $PayloadData "models") | Out-Null
     Copy-Item -LiteralPath $built -Destination (Join-Path $Payload "$ModuleName.dll") -Force
@@ -313,21 +424,24 @@ if ($Packaged) {
         ($manifest | ConvertTo-Json -Depth 5), (New-Object System.Text.UTF8Encoding($false)))
 }
 
-# --------------------------------------------------------------------------
-# 2) 配置先
-# --------------------------------------------------------------------------
-if (-not $Dest) { $Dest = Join-Path $env:ProgramData "obs-studio\plugins\$ModuleName" }
-
-Write-Head "配置"
-Write-Host "   インストール先: $Dest"
-
+# ==========================================================================
+# 3) 配置
+# ==========================================================================
 $binDst = Join-Path $Dest "bin\64bit"
 $dataDst = Join-Path $Dest "data"
-New-Item -ItemType Directory -Force -Path $binDst, (Join-Path $dataDst "models") | Out-Null
 
-Copy-Item -LiteralPath (Join-Path $Payload "$ModuleName.dll") `
-    -Destination (Join-Path $binDst "$ModuleName.dll") -Force
-Copy-Item -Path (Join-Path $PayloadData "*") -Destination $dataDst -Recurse -Force
+try {
+    Copy-Item -LiteralPath (Join-Path $Payload "$ModuleName.dll") `
+        -Destination (Join-Path $binDst "$ModuleName.dll") -Force
+    Copy-Item -Path (Join-Path $PayloadData "*") -Destination $dataDst -Recurse -Force
+} catch {
+    if (-not $NoElevate -and -not (Test-IsAdmin)) {
+        Write-Warn2 "コピーに失敗しました: $($_.Exception.Message)"
+        Write-Warn2 "管理者として実行し直します..."
+        exit (Invoke-ElevatedSelf -Bound $PSBoundParameters)
+    }
+    throw
+}
 Write-Ok "$binDst\$ModuleName.dll"
 Write-Ok "$dataDst"
 
@@ -339,22 +453,22 @@ if ((Split-Path -Leaf (Split-Path -Parent $Dest)) -eq "plugins" -and
     Write-Warn2 "  OBS は読みません (bin\64bit\<フォルダ名>.dll を探すため)。"
 }
 
-# --------------------------------------------------------------------------
-# 3) 旧名の掃除
-# --------------------------------------------------------------------------
+# ==========================================================================
+# 4) 旧名の掃除
+# ==========================================================================
 # フィルタ ID は据え置き (dpdfnet_voice_filter) なので、旧フォルダが残ると
 # 同じフィルタが 2 つ登録され、一覧に 2 つ出てしまう。
-Remove-OldInstall (Join-Path $env:ProgramData "obs-studio\plugins\$LegacyName") "ProgramData"
-if ($Dest -ne (Join-Path $env:ProgramData "obs-studio\plugins\$ModuleName")) {
+$stdDest = Join-Path $env:ProgramData "obs-studio\plugins\$ModuleName"
+$stdOld = Join-Path $env:ProgramData "obs-studio\plugins\$LegacyName"
+Remove-OldInstall $stdOld "ProgramData"
+if ($Dest -ne $stdDest) {
     $siblingOld = Join-Path (Split-Path -Parent $Dest) $LegacyName
-    if ($siblingOld -ne (Join-Path $env:ProgramData "obs-studio\plugins\$LegacyName")) {
-        Remove-OldInstall $siblingOld "配置先の隣"
-    }
+    if ($siblingOld -ne $stdOld) { Remove-OldInstall $siblingOld "配置先の隣" }
 }
 
-# --------------------------------------------------------------------------
-# 4) OBS の検出と、ポータブル版への追加配置
-# --------------------------------------------------------------------------
+# ==========================================================================
+# 5) OBS の検出と、ポータブル版への追加配置
+# ==========================================================================
 if ($NoDetect) {
     Write-Skip "OBS の検出は -NoDetect で省略されました。"
 } else {
@@ -404,17 +518,17 @@ if ($NoDetect) {
     if ($portable.Count -gt 0) {
         Write-Head "ポータブル版への追加配置"
         Write-Host "   ProgramData を読まないため、OBS 側にもコピーします。"
-        foreach ($p in ($portable | Select-Object -Unique)) { Install-InPlace $p }
+        foreach ($p in ($portable | Select-Object -Unique)) { [void](Install-InPlace $p) }
     }
 }
 
-# --------------------------------------------------------------------------
-# 5) 後片付け
-# --------------------------------------------------------------------------
-$tmp = Join-Path $root "payload_tmp"
-if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Recurse -Force }
+# ==========================================================================
+# 6) 後片付けとまとめ
+# ==========================================================================
+if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
 
 Write-Head "完了"
+Write-Host "   インストール先: $Dest" -ForegroundColor Cyan
 Write-Host "   OBS を起動し、音声ソースの「フィルタ」から" -ForegroundColor Cyan
 Write-Host "     OBS Noise Suppressor" -ForegroundColor Cyan
 Write-Host "   を追加してください。プロパティの" -ForegroundColor Cyan
