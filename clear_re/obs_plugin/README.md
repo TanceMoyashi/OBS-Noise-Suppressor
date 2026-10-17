@@ -248,5 +248,7 @@ OBS を起動せずに済む DSP の検証は `build.ps1 -Tests` で回せます
   変更の明示）を満たしてください。
 - OBS 本体は GPL-2.0-or-later です。libobs の API にリンクして配布するプラグインは、
   互換ライセンス（例: GPL-2.0-or-later）を付けるのが安全です。
-- 本リポジトリの自作コードのライセンスは現状**未設定**です（推奨: GPL-2.0-or-later）。
+- 本リポジトリの自作コード（Rust のプラグイン本体・PowerShell / Python の
+  ツール類）は **GPL-2.0-or-later** です。全文はリポジトリ直下の [`LICENSE`](../../LICENSE)
+  にあります。`install.bat` で入る配布パッケージにも `LICENSE` を同梱しています。
 

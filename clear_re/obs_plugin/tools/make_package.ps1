@@ -11,6 +11,7 @@
         uninstall.bat                       アンインストーラー
         uninstall.ps1                       その中身
         README.txt                          使い方 (日本語)
+        LICENSE                             ライセンス (GPL-2.0-or-later)
         bin\64bit\obs_noise_suppressor.dll  本体
         data\dpdfnet_onnxruntime.dll        ONNX Runtime (同梱)
         data\models\*.onnx                  モデル
@@ -83,6 +84,14 @@ foreach ($f in @("install.ps1", "uninstall.ps1", "installer\install.bat", "insta
     Copy-Item -LiteralPath (Join-Path $root $f) -Destination $pkg -Force
 }
 
+# --- ライセンス (GPL はバイナリ配布時に全文の同梱を要求する) ---
+$licenseSrc = Join-Path (Split-Path -Parent $repo) "LICENSE"
+if (Test-Path -LiteralPath $licenseSrc) {
+    Copy-Item -LiteralPath $licenseSrc -Destination (Join-Path $pkg "LICENSE") -Force
+} else {
+    Write-Warning "LICENSE が見つかりません: $licenseSrc"
+}
+
 # --- README.txt (UTF-8 BOM + CRLF。メモ帳で開く) ---
 $readme = @"
 OBS Noise Suppressor v$version (Windows 64bit / OBS Studio 28 以降)
@@ -152,11 +161,16 @@ uninstall.bat をダブルクリックして y を押します。
     data\dpdfnet_onnxruntime.dll         (ONNX Runtime)
     data\models\*.onnx                   (モデル)
     data\manifest.json
+* 前回「管理者として実行」してインストールしていた場合、ProgramData の
+  ファイルが Administrators 所有になっていて上書きできません。
+  install.bat / uninstall.bat はこれを検出すると自動で管理者として
+  起動し直します (UAC の確認が出ます)。
 
 
 ライセンス
 ----------
 * このプラグイン本体 (Rust で書いた部分): GPL-2.0-or-later
+  全文は同梱の LICENSE を参照してください。
 * ONNX Runtime (dpdfnet_onnxruntime.dll): MIT License (Microsoft)
 * DPDFNet モデル (*.onnx): 同梱モデルのライセンスに従います
 
