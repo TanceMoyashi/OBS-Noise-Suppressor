@@ -4,7 +4,7 @@
 ONNX Runtime と DPDFNet モデルを同梱した Windows x64 版で、追加のダウンロードは
 要りません。プラグイン ABI・DSP・パネル UI まで**すべて Rust** で書いています。
 
-![パネル（OBS 実機で音を流した状態）](docs/panel.png)
+![パネル（OBS 実機で音を流した状態）](https://github.com/TanceMoyashi/OBS-Noise-Suppressor/raw/main/docs/panel.png)
 
 > 旧 VST3 版 **DPDFNet Voice** を OBS ネイティブに作り直したものです。フィルタ ID
 > （`dpdfnet_voice_filter`）は据え置きなので、既存のシーンコレクションはそのまま動きます。
