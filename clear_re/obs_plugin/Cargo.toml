@@ -1,0 +1,61 @@
+[package]
+name = "dpdfnet-voice-obs"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "DPDFNet Voice - OBS Studio native audio filter (Rust)"
+
+[lib]
+name = "dpdfnet_voice"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+# OBS はオーディオスレッドで我々のコールバックを直接呼ぶ。
+# パニックは FFI 境界で catch_unwind して握りつぶす設計なので unwind のままにする
+# (abort にするとパニック 1 つで OBS ごと落ちる)。
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[dependencies]
+# ONNX Runtime の C API バインディング（unsafe な生 binding のみ）。
+# 高レベルの ort ラッパは使わない:
+#   * オーディオスレッドで一切アロケートしない設計 (IoBinding + 事前確保テンソル) を
+#     そのまま書きたい
+#   * どの API バージョンを要求するか自分で決めたい
+#   * 依存を ndarray 等まで広げたくない
+#
+# api-17 = ORT 1.17 相当の構造体プレフィックスのみ。OrtApi は追記型なので
+# これで ORT 1.31 でも安全に動く（必要な関数は全て 1.17 以前から存在する）。
+# disable-linking = リンクせず、実行時に自分でロードする。
+ort-sys = { version = "2.0.0-rc.14", default-features = false, features = [
+    "std",
+    "api-17",
+    "disable-linking",
+] }
+
+# n_fft = 960 = 2^6 * 3 * 5 の混合基数 FFT（kissfft 相当）。実 FFT なので realfft。
+realfft = "3.5.0"
+
+# Win32（DLL のロード、自前 UI、ファイル列挙）
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_Storage_FileSystem",
+    "Win32_System_SystemInformation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+    "Win32_System_Com",
+] }
+
+[dev-dependencies]
+# オフライン検証用（OBS を起動せず DSP だけを回して WAV を比較する）
+hound = "3.5"

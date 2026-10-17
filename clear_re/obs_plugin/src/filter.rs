@@ -1,0 +1,696 @@
+//! OBS フィルタ本体（libobs との境界）。
+//!
+//! `clear_re/plugin/src/PluginProcessor.cpp` の役割をそのまま引き継ぐ:
+//!   * 48 kHz 以外はパススルー
+//!   * モデル未ロードはパススルー
+//!   * チャンネル数は OBS の音声設定に従う（モノラル/ステレオ）
+//!   * 内容遅延は `kLatencyHops * hop` = 2880 サンプル (60 ms)
+//!
+//! スレッドモデル:
+//!   * `create` / `update` / `activate` / `deactivate` / `destroy` は UI スレッド
+//!   * `filter_audio` はオーディオスレッド
+//!
+//! libobs は `update` と `filter_audio` の相互排他を**してくれない**
+//! (`obs_source_update` は音声専用ソースでは `filter_mutex` を取らない)。
+//! そのため `update` はアトミックなパラメータ書き込みだけを行い、
+//! エンジン（= ORT セッション）の再構築は `activate` でのみ行う。
+
+use std::ffi::{c_char, CStr};
+use std::os::raw::c_void;
+use std::path::PathBuf;
+use std::ptr;
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+use crate::obs_log;
+use crate::dump::Dump;
+use crate::dsp::engine::{self, Engine, Meters, ParamSnapshot};
+use crate::dsp::ort;
+use crate::dsp::params as dsp;
+use crate::paths;
+use crate::ui;
+
+// --------------------------------------------------------------------------
+// ステータス
+// --------------------------------------------------------------------------
+
+pub const ST_OK: u32 = 0;
+pub const ST_NOT_48K: u32 = 1;
+pub const ST_MODEL_NOT_FOUND: u32 = 2;
+pub const ST_MODEL_LOAD_FAILED: u32 = 3;
+pub const ST_ORT_UNAVAILABLE: u32 = 4;
+pub const ST_INACTIVE: u32 = 5;
+
+pub const OBS_SR: u32 = 48_000;
+
+// --------------------------------------------------------------------------
+// パラメータ（オーディオスレッドはアトミックを読むだけ）
+// --------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub struct Params {
+    ambience: AtomicU32,
+    voice: AtomicU32,
+    voice_reverb: AtomicU32,
+}
+
+impl Params {
+    fn new() -> Self {
+        Self {
+            ambience: AtomicU32::new((dsp::AMBIENCE_DEFAULT as f32).to_bits()),
+            voice: AtomicU32::new((dsp::VOICE_DEFAULT as f32).to_bits()),
+            voice_reverb: AtomicU32::new((dsp::VOICE_REVERB_DEFAULT as f32).to_bits()),
+        }
+    }
+
+    pub fn snapshot(&self) -> ParamSnapshot {
+        ParamSnapshot {
+            ambience: f32::from_bits(self.ambience.load(Ordering::Relaxed)),
+            voice_db: f32::from_bits(self.voice.load(Ordering::Relaxed)),
+            voice_reverb: f32::from_bits(self.voice_reverb.load(Ordering::Relaxed)),
+        }
+    }
+
+    pub fn ambient(&self) -> f32 {
+        f32::from_bits(self.ambience.load(Ordering::Relaxed))
+    }
+    pub fn voice(&self) -> f32 {
+        f32::from_bits(self.voice.load(Ordering::Relaxed))
+    }
+    pub fn voice_reverb(&self) -> f32 {
+        f32::from_bits(self.voice_reverb.load(Ordering::Relaxed))
+    }
+
+    pub fn set_ambience(&self, v: f32) {
+        self.ambience.store(v.to_bits(), Ordering::Relaxed);
+    }
+    pub fn set_voice(&self, v: f32) {
+        self.voice.store(v.to_bits(), Ordering::Relaxed);
+    }
+    pub fn set_voice_reverb(&self, v: f32) {
+        self.voice_reverb.store(v.to_bits(), Ordering::Relaxed);
+    }
+
+    /// OBS の設定から読み込む（`update` / `create` のみが呼ぶ）。
+    pub fn read_settings(&self, settings: *mut crate::ffi::obs_data_t) {
+        if settings.is_null() {
+            return;
+        }
+        unsafe {
+            let a = crate::ffi::obs_data_get_double(settings, dsp::AMBIENCE.as_ptr()) as f32;
+            let v = crate::ffi::obs_data_get_double(settings, dsp::VOICE.as_ptr()) as f32;
+            let r = crate::ffi::obs_data_get_double(settings, dsp::VOICE_REVERB.as_ptr()) as f32;
+            self.set_ambience(a);
+            self.set_voice(v);
+            self.set_voice_reverb(r);
+        }
+    }
+}
+
+// --------------------------------------------------------------------------
+// 共有状態（オーディオスレッド / UI スレッド / パネルが触る）
+// --------------------------------------------------------------------------
+
+/// パネル UI と共有する状態。
+///
+/// **`Arc` で持つのが肝**。パネルはウィンドウが生きている間 `Arc` を保持するので、
+/// OBS 側のフィルタが先に破棄されてもぶら下がりポインタを作らない。
+/// `source`（`obs_source_t*`）だけは OBS が所有するため、`alive` が false に
+/// なったらパネルからは触らない。
+pub struct Shared {
+    pub params: Params,
+    pub meters: Arc<Meters>,
+
+    /// フィルタが生存しているか。`destroy` で false になる。
+    pub alive: AtomicBool,
+
+    /// 開いているパネルの `HWND`（0 = 閉じている）。UI スレッドのみが書く。
+    pub panel: AtomicUsize,
+
+    /// 2 出力モデル（dereverb あり）か。パネルの REVERB ノブの有効/無効に使う。
+    pub dereverb: AtomicBool,
+
+    status: AtomicU32,
+    status_detail: Mutex<String>,
+    /// モデルの概要（パネルに出す 1 行）。
+    summary: Mutex<String>,
+}
+
+impl Shared {
+    pub(crate) fn new(meters: Arc<Meters>) -> Self {
+        Self {
+            params: Params::new(),
+            meters,
+            alive: AtomicBool::new(true),
+            panel: AtomicUsize::new(0),
+            dereverb: AtomicBool::new(false),
+            status: AtomicU32::new(ST_INACTIVE),
+            status_detail: Mutex::new(String::new()),
+            summary: Mutex::new(String::new()),
+        }
+    }
+
+    pub fn status(&self) -> u32 {
+        self.status.load(Ordering::Relaxed)
+    }
+
+    pub fn status_detail(&self) -> String {
+        self.status_detail.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    pub fn summary(&self) -> String {
+        self.summary.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    pub fn set_status_detail(&self, status: u32, detail: impl Into<String>) {
+        let detail = detail.into();
+        if let Ok(mut g) = self.status_detail.lock() {
+            *g = detail.clone();
+        }
+        let prev = self.status.swap(status, Ordering::Relaxed);
+        if prev != status {
+            obs_log!(crate::ffi::LOG_INFO, "status: {}", detail);
+        }
+    }
+
+    pub(crate) fn set_summary(&self, s: String) {
+        if let Ok(mut g) = self.summary.lock() {
+            *g = s;
+        }
+    }
+}
+
+// --------------------------------------------------------------------------
+// インスタンスデータ
+// --------------------------------------------------------------------------
+
+pub struct FilterData {
+    /// パネルと共有する状態。
+    pub shared: Arc<Shared>,
+
+    /// 現在のエンジン。`null` はパススルー。
+    ///
+    /// 書き換えは UI スレッド (`activate` / `destroy`) のみ。オーディオスレッドは
+    /// `Acquire` で読んで使う。`activate` は「まだ音が流れていない」時点で
+    /// 呼ばれるため、差し替え中の競合は実質起きない（OBS の音声フィルタは
+    /// activate 前に `filter_audio` を呼ばない）。
+    engine: AtomicPtr<Engine>,
+    engine_channels: AtomicUsize,
+
+    /// 再生位置 (ns)。不連続を検出してリセットするため。
+    last_timestamp: AtomicU64,
+
+    /// フィルタソース自身（プロパティ/UI から親を引くため）。借用のみで保持。
+    pub source: *mut crate::ffi::obs_source_t,
+
+    /// モデル / ORT を探すディレクトリ。
+    pub resource_dirs: Vec<PathBuf>,
+
+    /// 実機検証用のダンプ（`DPDFNET_DUMP` が設定されているときだけ `Some`）。
+    /// 環境変数が無ければ `None` なので、通常運用ではロックすら取らない。
+    pub dump: Mutex<Option<Dump>>,
+}
+
+impl FilterData {
+    pub fn new(
+        settings: *mut crate::ffi::obs_data_t,
+        source: *mut crate::ffi::obs_source_t,
+        resource_dirs: Vec<PathBuf>,
+    ) -> Self {
+        let me = Self {
+            shared: Arc::new(Shared::new(Arc::new(Meters::new()))),
+            engine: AtomicPtr::new(ptr::null_mut()),
+            engine_channels: AtomicUsize::new(0),
+            last_timestamp: AtomicU64::new(0),
+            source,
+            resource_dirs,
+            dump: Mutex::new(None),
+        };
+        me.shared.params.read_settings(settings);
+        me
+    }
+
+    pub fn status_detail(&self) -> String {
+        self.shared.status_detail()
+    }
+
+    fn set_status_detail(&self, status: u32, detail: impl Into<String>) {
+        self.shared.set_status_detail(status, detail)
+    }
+
+    /// エンジンを（必要なら）組み立てる。UI スレッド専用。
+    pub fn activate_engine(&self) -> bool {
+        let audio = unsafe { crate::ffi::obs_get_audio() };
+        if audio.is_null() {
+            self.set_status_detail(ST_INACTIVE, "OBS audio がまだ初期化されていない");
+            return false;
+        }
+
+        let sr = unsafe { crate::ffi::audio_output_get_sample_rate(audio) };
+        if sr != OBS_SR {
+            // 48 kHz 専用。他のレートではパススルー。
+            self.set_status_detail(
+                ST_NOT_48K,
+                format!("OBS の音声が {sr} Hz です。48 kHz に設定してください（今はパススルー）"),
+            );
+            return false;
+        }
+
+        let want = (unsafe { crate::ffi::audio_output_get_channels(audio) } as usize).clamp(1, 2);
+
+        let cur = self.engine.load(Ordering::Acquire);
+        if !cur.is_null() && self.engine_channels.load(Ordering::Relaxed) == want {
+            return true;
+        }
+
+        // ONNX Runtime を先に確定させる（失敗理由を出せるように）。
+        if let Err(e) = ort::ensure_loaded(&self.resource_dirs) {
+            self.set_status_detail(ST_ORT_UNAVAILABLE, e);
+            return false;
+        }
+
+        let model = paths::env_model_file().or_else(|| paths::find_model(&self.resource_dirs));
+        let Some(model) = model else {
+            self.set_status_detail(
+                ST_MODEL_NOT_FOUND,
+                format!(
+                    "DPDFNet モデルが見つかりません (探索先: {})",
+                    paths::model_dirs(&self.resource_dirs)
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(" / ")
+                ),
+            );
+            return false;
+        };
+
+        match engine::build(
+            want,
+            &model,
+            &self.resource_dirs,
+            Arc::clone(&self.shared.meters),
+        ) {
+            Ok(eng) => {
+                let summary = eng.model_summary.clone();
+                let eng_latency = eng.latency_samples;
+                let dereverb = eng.dereverb_available;
+                let ptr = Box::into_raw(Box::new(eng));
+
+                let old = self.engine.swap(ptr, Ordering::AcqRel);
+                self.engine_channels.store(want, Ordering::Relaxed);
+                self.shared.dereverb.store(dereverb, Ordering::Relaxed);
+
+                // 実機検証用のダンプ（`DPDFNET_DUMP` 未設定なら何もしない）。
+                if let Ok(mut g) = self.dump.lock() {
+                    if g.is_none() {
+                        *g = Dump::from_env(OBS_SR);
+                    }
+                }
+
+                if !old.is_null() {
+                    // activate は音が流れていない時点なので安全に破棄できる。
+                    unsafe { drop(Box::from_raw(old)) };
+                }
+
+                self.set_status_detail(
+                    ST_OK,
+                    format!(
+                        "48 kHz / ch={want} / latency {} samples / {summary}",
+                        eng_latency
+                    ),
+                );
+                // パネルに出す 1 行は短く保つ（冗長な詳細は status_detail 側にあり、
+                // ログとプロパティの説明に出る）。旧 VST3 版の
+                // `48 kHz / model loaded (2 outputs)` に相当する。
+                self.shared.set_summary(format!(
+                    "{want} ch  ·  48 kHz  ·  遅延 {} samples ({:.0} ms)  ·  dereverb {}",
+                    eng_latency,
+                    eng_latency as f64 / OBS_SR as f64 * 1000.0,
+                    if dereverb { "あり" } else { "なし" }
+                ));
+                true
+            }
+            Err(e) => {
+                self.set_status_detail(ST_MODEL_LOAD_FAILED, format!("モデルの読み込みに失敗: {e}"));
+                false
+            }
+        }
+    }
+
+    pub fn engine_ptr(&self) -> *mut Engine {
+        self.engine.load(Ordering::Acquire)
+    }
+
+    pub fn drop_engine(&self) {
+        let old = self.engine.swap(ptr::null_mut(), Ordering::AcqRel);
+        self.engine_channels.store(0, Ordering::Relaxed);
+        if !old.is_null() {
+            unsafe { drop(Box::from_raw(old)) };
+        }
+    }
+}
+
+// --------------------------------------------------------------------------
+// リソース探索パス
+// --------------------------------------------------------------------------
+
+/// モデルと ORT を探すディレクトリ一覧。
+pub fn collect_resource_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    // 1) OBS が設定したモジュールデータディレクトリ
+    if let Some(d) = module_data_dir() {
+        dirs.push(d.clone());
+        dirs.push(d.join("models"));
+    }
+
+    // 2) 自分の DLL の 2 つ上 (= <plugin root>) とその data
+    if let Some(dll_dir) = paths::own_dll_dir() {
+        let root = dll_dir.join("..").join("..");
+        dirs.push(root.join("data"));
+        dirs.push(root.join("data").join("models"));
+        dirs.push(root.clone());
+    }
+
+    dirs
+}
+
+/// `obs_module_file("")` 相当。モジュールのデータディレクトリ。
+pub fn module_data_dir() -> Option<PathBuf> {
+    let module = crate::MODULE_POINTER.load(Ordering::SeqCst);
+    if module.is_null() {
+        return None;
+    }
+
+    let p = unsafe { crate::ffi::obs_find_module_file(module, c"".as_ptr()) };
+    if p.is_null() {
+        return None;
+    }
+
+    let s = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
+    unsafe { crate::ffi::bfree(p as *mut c_void) };
+
+    if s.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(s))
+    }
+}
+
+// --------------------------------------------------------------------------
+// obs_source_info コールバック
+// --------------------------------------------------------------------------
+
+pub unsafe extern "C" fn get_name(_type_data: *mut c_void) -> *const c_char {
+    c"DPDFNet Voice".as_ptr()
+}
+
+pub unsafe extern "C" fn create(
+    settings: *mut crate::ffi::obs_data_t,
+    source: *mut crate::ffi::obs_source_t,
+) -> *mut c_void {
+    crate::guard(|| {
+        let dirs = collect_resource_dirs();
+        let fd = Box::new(FilterData::new(settings, source, dirs));
+        obs_log!(
+            crate::ffi::LOG_INFO,
+            "filter created (ambience {:.2}, voice {:.2} dB, reverb {:.2})",
+            fd.shared.params.ambient(),
+            fd.shared.params.voice(),
+            fd.shared.params.voice_reverb()
+        );
+        Box::into_raw(fd) as *mut c_void
+    })
+}
+
+pub unsafe extern "C" fn destroy(data: *mut c_void) {
+    crate::guard(|| {
+        if data.is_null() {
+            return;
+        }
+        let fd = Box::from_raw(data as *mut FilterData);
+        // パネルが `source` に触らないように先に落とす。
+        fd.shared.alive.store(false, Ordering::SeqCst);
+        ui::close_panel(&fd.shared);
+        fd.drop_engine();
+        // ダンプはヘッダを書き戻して閉じる（WAV として読めるように）。
+        if let Ok(mut g) = fd.dump.lock() {
+            if let Some(d) = g.as_mut() {
+                d.finish();
+            }
+        }
+        obs_log!(crate::ffi::LOG_INFO, "filter destroyed");
+    })
+}
+
+pub unsafe extern "C" fn get_defaults(settings: *mut crate::ffi::obs_data_t) {
+    crate::guard(|| {
+        if settings.is_null() {
+            return;
+        }
+        crate::ffi::obs_data_set_default_double(
+            settings,
+            dsp::AMBIENCE.as_ptr(),
+            dsp::AMBIENCE_DEFAULT,
+        );
+        crate::ffi::obs_data_set_default_double(settings, dsp::VOICE.as_ptr(), dsp::VOICE_DEFAULT);
+        crate::ffi::obs_data_set_default_double(
+            settings,
+            dsp::VOICE_REVERB.as_ptr(),
+            dsp::VOICE_REVERB_DEFAULT,
+        );
+    })
+}
+
+pub unsafe extern "C" fn update(data: *mut c_void, settings: *mut crate::ffi::obs_data_t) {
+    crate::guard(|| {
+        if data.is_null() || settings.is_null() {
+            return;
+        }
+        // アトミック書き込みのみ。エンジンには触らない。
+        let fd = &*(data as *const FilterData);
+        fd.shared.params.read_settings(settings);
+        obs_log!(
+            crate::ffi::LOG_DEBUG,
+            "settings updated (ambience {:.2}, voice {:.2} dB, reverb {:.2})",
+            fd.shared.params.ambient(),
+            fd.shared.params.voice(),
+            fd.shared.params.voice_reverb()
+        );
+    })
+}
+
+pub unsafe extern "C" fn activate(data: *mut c_void) {
+    crate::guard(|| {
+        if data.is_null() {
+            return;
+        }
+        let fd = &*(data as *const FilterData);
+        fd.activate_engine();
+
+        // 検証用: `DPDFNET_OPEN_PANEL_ON_START` があればパネルを自動で開く
+        // (クリック操作なしで見た目を確認するため)。
+        if std::env::var_os("DPDFNET_OPEN_PANEL_ON_START").is_some()
+            && fd.shared.panel.load(Ordering::SeqCst) == 0
+        {
+            if let Err(e) = ui::open_panel(&fd.shared, fd.source) {
+                obs_log!(crate::ffi::LOG_WARNING, "パネルを開けません: {e}");
+            }
+        }
+    })
+}
+
+pub unsafe extern "C" fn deactivate(data: *mut c_void) {
+    crate::guard(|| {
+        if data.is_null() {
+            return;
+        }
+        let fd = &*(data as *const FilterData);
+        fd.set_status_detail(ST_INACTIVE, "非アクティブ（パススルー）");
+    })
+}
+
+pub unsafe extern "C" fn get_properties(
+    data: *mut c_void,
+) -> *mut crate::ffi::obs_properties_t {
+    crate::guard(|| {
+        let props = crate::ffi::obs_properties_create();
+
+        let status = if data.is_null() {
+            "（フィルタが未設定）".to_string()
+        } else {
+            let fd = &*(data as *const FilterData);
+            fd.status_detail()
+        };
+
+        let info = crate::ffi::obs_properties_add_text(
+            props,
+            c"dpdfnet_info".as_ptr(),
+            c"DPDFNet Voice — 48 kHz 専用 / 内容遅延 60 ms".as_ptr(),
+            crate::ffi::OBS_TEXT_INFO,
+        );
+        let status_c = std::ffi::CString::new(status).unwrap_or_default();
+        crate::ffi::obs_property_set_long_description(info, status_c.as_ptr());
+
+        let amb = crate::ffi::obs_properties_add_float_slider(
+            props,
+            dsp::AMBIENCE.as_ptr(),
+            c"Ambience".as_ptr(),
+            dsp::AMBIENCE_MIN,
+            dsp::AMBIENCE_MAX,
+            0.01,
+        );
+        crate::ffi::obs_property_set_description(
+            amb,
+            c"残す暗騒音。0 % = 最大抑圧 (-48 dB)、100 % = 最小抑圧 (-6 dB)".as_ptr(),
+        );
+
+        let voice = crate::ffi::obs_properties_add_float_slider(
+            props,
+            dsp::VOICE.as_ptr(),
+            c"Voice".as_ptr(),
+            dsp::VOICE_MIN,
+            dsp::VOICE_MAX,
+            0.1,
+        );
+        crate::ffi::obs_property_float_set_suffix(voice, c" dB".as_ptr());
+        crate::ffi::obs_property_set_description(
+            voice,
+            c"声の presence。0 dB で完全なパススルー".as_ptr(),
+        );
+
+        let rev = crate::ffi::obs_properties_add_float_slider(
+            props,
+            dsp::VOICE_REVERB.as_ptr(),
+            c"Voice Reverb".as_ptr(),
+            dsp::VOICE_REVERB_MIN,
+            dsp::VOICE_REVERB_MAX,
+            0.01,
+        );
+        crate::ffi::obs_property_set_description(
+            rev,
+            c"残す残響（モデルが 2 出力のときのみ有効）".as_ptr(),
+        );
+
+        // 自前 Win32 パネル（ノブ + メーター）。`data` はこのフィルタの
+        // `FilterData` なので、そのまま `priv` として渡せる。
+        if !data.is_null() {
+            crate::ffi::obs_properties_add_button2(
+                props,
+                c"dpdfnet_panel".as_ptr(),
+                c"パネルを開く（ノブ / メーター）".as_ptr(),
+                Some(on_open_panel_clicked),
+                data,
+            );
+        }
+
+        props
+    })
+}
+
+/// 「パネルを開く」ボタン。
+unsafe extern "C" fn on_open_panel_clicked(
+    _props: *mut crate::ffi::obs_properties_t,
+    _property: *mut crate::ffi::obs_property_t,
+    data: *mut c_void,
+) -> bool {
+    crate::guard(|| {
+        if data.is_null() {
+            return false;
+        }
+        let fd = &*(data as *const FilterData);
+        let shared = Arc::clone(&fd.shared);
+        match ui::open_panel(&shared, fd.source) {
+            Ok(()) => {
+                obs_log!(crate::ffi::LOG_INFO, "panel opened");
+                true
+            }
+            Err(e) => {
+                obs_log!(crate::ffi::LOG_WARNING, "パネルを開けません: {}", e);
+                false
+            }
+        }
+    })
+}
+
+/// 音声処理。`audio` をその場で書き換えて返す。
+pub unsafe extern "C" fn filter_audio(
+    data: *mut c_void,
+    audio: *mut crate::ffi::obs_audio_data,
+) -> *mut crate::ffi::obs_audio_data {
+    // パニック時は素通し（audio をそのまま返す）。
+    let fallback = audio;
+
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if data.is_null() || audio.is_null() {
+            return;
+        }
+
+        let fd = &*(data as *const FilterData);
+        let engine_ptr = fd.engine_ptr();
+        if engine_ptr.is_null() {
+            return; // パススルー
+        }
+
+        let a = &mut *audio;
+        let frames = a.frames as usize;
+        if frames == 0 {
+            return;
+        }
+
+        // チャンネル数は data[i] が非 NULL の個数（obs_audio_data にフィールドが無い）。
+        let mut num_ch = 0usize;
+        for plane in a.data.iter() {
+            if plane.is_null() {
+                break;
+            }
+            num_ch += 1;
+        }
+        if num_ch == 0 {
+            return;
+        }
+
+        let engine = &mut *engine_ptr;
+        if engine.num_channels != num_ch {
+            // 設定変更などでチャンネル数が変わった。activate で作り直すまでパススルー。
+            return;
+        }
+
+        // タイムスタンプの不連続（一時停止など）で状態をリセットする。
+        let ts = a.timestamp;
+        let last = fd.last_timestamp.swap(ts, Ordering::Relaxed);
+        if last != 0 && ts.wrapping_sub(last) > 1_000_000_000 {
+            engine.reset();
+        }
+
+        let mut buffers = [ptr::null_mut::<f32>(); crate::ffi::MAX_AV_PLANES];
+        for (i, plane) in a.data.iter().take(num_ch).enumerate() {
+            buffers[i] = *plane as *mut f32;
+        }
+
+        // 検証用ダンプ（`DPDFNET_DUMP` 未設定なら `None` で素通り）。
+        // エンジンの `process` はその場でバッファを書き換えるので、入力を先に控える。
+        let mut guard = fd.dump.lock().ok();
+        if let Some(d) = guard.as_deref_mut().and_then(|o| o.as_mut()) {
+            d.capture_input(&buffers[..num_ch], frames);
+        }
+
+        engine.process(
+            &buffers[..num_ch],
+            frames,
+            fd.shared.params.snapshot(),
+        );
+
+        if let Some(d) = guard.as_deref_mut().and_then(|o| o.as_mut()) {
+            d.write_output(&buffers[..num_ch], frames);
+        }
+    }));
+
+    if r.is_err() {
+        obs_log!(crate::ffi::LOG_ERROR, "panic in filter_audio; passthrough");
+        return fallback;
+    }
+
+    audio
+}

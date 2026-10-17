@@ -1,0 +1,22 @@
+# --- ビルド生成物 ---
+clear_re/plugin/build/
+clear_re/obs_plugin/target/
+
+# --- ログ ---
+*.log
+
+# --- Python ---
+**/__pycache__/
+*.py[cod]
+
+# --- 解析の生ダンプ (tools/strings_peek.py で再生成できる) ---
+clear_re/out/
+
+# --- 検証の生成物 ---
+clear_re/plugin/out_check*.wav
+test_project_out_check.wav
+clear_re/plugin/ui_preview*.png
+clear_re/obs_plugin/vendor/*.exp
+
+# --- エディタ設定 ---
+.vscode/
