@@ -403,7 +403,7 @@ pub fn module_data_dir() -> Option<PathBuf> {
 // --------------------------------------------------------------------------
 
 pub unsafe extern "C" fn get_name(_type_data: *mut c_void) -> *const c_char {
-    c"DPDFNet Voice".as_ptr()
+    c"OBS Noise Suppressor".as_ptr()
 }
 
 pub unsafe extern "C" fn create(
@@ -527,7 +527,7 @@ pub unsafe extern "C" fn get_properties(
         let info = crate::ffi::obs_properties_add_text(
             props,
             c"dpdfnet_info".as_ptr(),
-            c"DPDFNet Voice — 48 kHz 専用 / 内容遅延 60 ms".as_ptr(),
+            c"OBS Noise Suppressor — 48 kHz 専用 / 内容遅延 60 ms".as_ptr(),
             crate::ffi::OBS_TEXT_INFO,
         );
         let status_c = std::ffi::CString::new(status).unwrap_or_default();

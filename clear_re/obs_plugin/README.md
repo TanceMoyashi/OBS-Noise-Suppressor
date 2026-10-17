@@ -1,12 +1,20 @@
-# DPDFNet Voice — OBS Studio ネイティブ音声フィルタ
+# OBS Noise Suppressor — OBS Studio ネイティブ音声フィルタ
 
 音声向けニューラル強調（ノイズ抑圧 + 残響抑圧）を OBS に直接組み込む、**Rust 実装の
 OBS 音声フィルタ**です。旧構成（VST3 + atkAudio）を置き換えるもので、DSP は
 JUCE 非依存だった VST3 版のコードをそのまま移植しています（`src/dsp/`）。
+推論には DPDFNet モデルを使います。
 
-- フィルタ名（OBS のフィルタ一覧）: **DPDFNet Voice**
-- フィルタ ID: `dpdfnet_voice_filter`
+- フィルタ名（OBS のフィルタ一覧）: **OBS Noise Suppressor**
+- フィルタ ID: `dpdfnet_voice_filter`（**据え置き**。変えると既存シーンの
+  フィルタが消えるため）
 - 対応: OBS Studio 32.x / Windows x64
+
+> 旧名は **DPDFNet Voice** でした。プロジェクト名・モジュール名・DLL 名・
+> インストール先・表示名を `OBS Noise Suppressor` / `obs_noise_suppressor` に
+> 変更していますが、**フィルタ ID は据え置き**なので既存のシーンコレクションは
+> そのまま動きます。旧フォルダが残ると同じフィルタが二重に登録されるため、
+> `install.ps1` / `install.bat` は旧名のフォルダを自動で削除します。
 
 ## 特徴
 
@@ -37,7 +45,7 @@ JUCE 非依存だった VST3 版のコードをそのまま移植しています
 探索先（`DPDFNET_MODEL` で明示指定も可）:
 
 - OBS のモジュールデータディレクトリ（＝ `data\`）とその `models\`
-- `dpdfnet_voice.dll` の隣、および 2 つ上（`<plugin root>\data` / `data\models`）
+- `obs_noise_suppressor.dll` の隣、および 2 つ上（`<plugin root>\data` / `data\models`）
 - `ドキュメント\DPDFNetVoice\models`
 - `ドキュメント\OBS\VST3\models`（旧 VST3 版の配置をそのまま使える）
 
@@ -53,20 +61,82 @@ JUCE 非依存だった VST3 版のコードをそのまま移植しています
 
 ## インストール
 
+### 配布パッケージを使う（通常はこちら）
+
 ```powershell
-.\install.ps1                    # ビルド + 配置
+.\tools\make_package.ps1         # dist\OBS-Noise-Suppressor\ と ZIP を作る
+```
+
+できた `dist\OBS-Noise-Suppressor\install.bat` をダブルクリックします
+（中身は `install.ps1`）。削除は `uninstall.bat` です。
+
+```text
+dist\OBS-Noise-Suppressor\
+  install.bat / install.ps1          インストーラー
+  uninstall.bat / uninstall.ps1      アンインストーラー
+  README.txt                         使い方（日本語）
+  bin\64bit\obs_noise_suppressor.dll 本体
+  data\dpdfnet_onnxruntime.dll       ONNX Runtime（同梱）
+  data\models\*.onnx                 モデル
+  data\manifest.json                 OBS のプラグイン情報
+```
+
+### 配置先
+
+既定は `%ProgramData%\obs-studio\plugins\obs_noise_suppressor` です。
+**管理者権限もレジストリも使いません**（レジストリは読み書きしません）。
+
+```text
+%ProgramData%\obs-studio\plugins\obs_noise_suppressor\
+  bin\64bit\obs_noise_suppressor.dll   本体
+  data\dpdfnet_onnxruntime.dll         ONNX Runtime（同梱）
+  data\models\*.onnx                   モデル
+  data\manifest.json                   OBS のプラグイン情報
+```
+
+> **フォルダ名は DLL 名と一致させてください。**
+> OBS は `<フォルダ名>\bin\64bit\<フォルダ名>.dll` を組み立てて読みます。
+
+**インストール先は OBS のエディションに依存しません。** OBS 32 が Windows で
+プラグインを探す場所は、通常インストーラー版・Steam 版・Microsoft Store 版の
+どれでも次の 1 か所だからです（確認元: OBS ソース
+`frontend/widgets/OBSBasic.cpp` の `AddExtraModulePaths()` と
+`libobs/obs-windows.c` の `add_default_module_paths()`）。
+
+**例外はポータブル版だけ**です。ポータブル版は `%ProgramData%` を読まないので、
+`install.bat` はポータブル版を検出したとき、OBS 側の既定の相対パス
+
+```text
+<OBS ルート>\obs-plugins\64bit\obs_noise_suppressor.dll
+<OBS ルート>\data\obs-plugins\obs_noise_suppressor\
+```
+
+にもコピーします。自動検出から漏れる場合は `install.bat -Obs "D:\obs"` のように
+指定してください。
+
+### リポジトリから直接（開発時）
+
+```powershell
+.\install.ps1                    # ビルド + 配置（OBS の検出もする）
 .\install.ps1 -SkipBuild -SkipModels
 ```
 
-既定の配置先は `%ProgramData%\obs-studio\plugins\dpdfnet_voice`（管理者権限は不要）。
+`install.ps1` は、隣に `bin` / `data` があれば配布パッケージとして、なければ
+リポジトリとして（ビルドしてから）配置します。
 
-```text
-%ProgramData%\obs-studio\plugins\dpdfnet_voice\
-  bin\64bit\dpdfnet_voice.dll        本体
-  data\dpdfnet_onnxruntime.dll       ONNX Runtime（同梱）
-  data\models\*.onnx                 モデル
-  data\manifest.json                 OBS 32 のプラグイン情報
-```
+### インストーラーが BAT ではなく PowerShell な理由
+
+`install.bat` / `uninstall.bat` は**ダブルクリック用の ASCII だけのランチャー**で、
+実体は `install.ps1` / `uninstall.ps1` です。純バッチでも書けますが、**cmd.exe は
+マルチバイト文字を含むバッチファイルで行を見失うことがあります**（ラベルと
+`goto` が多いほど起きやすい）。実測では、日本語を直接書いた純バッチで
+
+- UTF-8 + `chcp 65001`: 264 行中 5 行が壊れ、コメントの一部がコマンドとして実行された
+- CP932（`chcp` なし）: 1 行が壊れた
+
+という結果でした。PowerShell は UTF-8 (BOM) のスクリプトを正しく読むので、
+日本語のメッセージはそちらに置いています。`-ExecutionPolicy Bypass` で起動するので
+実行ポリシーの影響も受けません。
 
 > **`onnxruntime.dll` という名前で置いてはいけません。**
 > OBS のプロセスには他プラグイン（atkAudio 等）が System32 の ORT 1.17 を既に
@@ -79,7 +149,7 @@ JUCE 非依存だった VST3 版のコードをそのまま移植しています
 ## 使い方
 
 1. フィルタをかけたいソース（マイク・メディアソースなど）を右クリック → **フィルタ**
-2. `+` → **DPDFNet Voice** を追加
+2. `+` → **OBS Noise Suppressor** を追加
 3. プロパティの **「パネルを開く（ノブ / メーター）」** ボタンで自前パネルが開きます
 
 ### プロパティ（OBS 標準 UI）
@@ -115,7 +185,12 @@ OBS には音声フィルタ用の汎用遅延補正がないため、同じシ�
 
 ```text
 obs_plugin/
-  build.ps1 / install.ps1      ビルドとインストール
+  build.ps1 / install.ps1        ビルドとインストール（開発時）
+  uninstall.ps1                  アンインストーラー
+  installer/
+    install.bat / uninstall.bat  ダブルクリック用ランチャー（ASCII のみ）
+  vendor/
+    dpdfnet_onnxruntime.dll      同梱する ONNX Runtime（MIT）
   src/
     lib.rs                     obs_module_load など OBS モジュールのエクスポート
     ffi.rs                     手書きの libobs FFI（bindgen なし）
@@ -132,8 +207,10 @@ obs_plugin/
       params.rs                パラメータ定義
       offline_tests.rs         OBS を起動しない検証（遅延・一致・決定性）
   tools/
+    make_package.ps1           配布パッケージ（install.bat 同梱）を作る
     make_verify_collection.py  実機検証用のシーンコレクション生成
     run_obs_verify.ps1         実機で回して数値で確認するハーネス
+    gen_obs_lib.ps1            vendor\obs.lib を obs.dll から作り直す
 ```
 
 ## 検証

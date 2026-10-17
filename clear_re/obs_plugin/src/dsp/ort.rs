@@ -215,7 +215,7 @@ pub fn global_env(api: &'static OrtApi) -> Result<usize, String> {
         let st = unsafe {
             (api.CreateEnv)(
                 logging_level(),
-                c"dpdfnet-voice".as_ptr() as *const c_char,
+                c"obs-noise-suppressor".as_ptr() as *const c_char,
                 &mut env,
             )
         };

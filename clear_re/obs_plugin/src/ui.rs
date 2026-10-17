@@ -132,7 +132,7 @@ pub fn open_panel(shared: &Arc<Shared>, source: *mut std::ffi::c_void) -> Result
     let thread_shared = Arc::clone(&shared);
 
     let handle = match std::thread::Builder::new()
-        .name("dpdfnet-panel".into())
+        .name("obs-noise-suppressor-panel".into())
         .stack_size(1 << 20)
         .spawn(move || run_panel(thread_shared, owner, src))
     {
@@ -211,7 +211,7 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 fn class_name() -> Vec<u16> {
-    wide("DPDFNetVoicePanel")
+    wide("ObsNoiseSuppressorPanel")
 }
 
 fn ensure_class() -> Result<u16, String> {
@@ -254,7 +254,7 @@ fn create_and_run(shared: Arc<Shared>, owner: SendHwnd, source: SendPtr) -> Resu
 
     let owner = owner.0;
     let class = class_name();
-    let title = wide("DPDFNet Voice");
+    let title = wide("OBS Noise Suppressor");
 
     // オーナーから DPI を推定する（ウィンドウが無いので GetDpiForWindow が使えるのは
     // オーナーだけ）。
@@ -1222,7 +1222,7 @@ impl Panel {
             // ---- ヘッダ ----
             draw_text(
                 dc,
-                "DPDFNet Voice",
+                "OBS Noise Suppressor",
                 lay.title.top(sc(21.0)),
                 fonts.title,
                 TEXT,
@@ -1703,7 +1703,7 @@ mod tests {
         shared.params.set_ambience(1.0);
         shared.set_status_detail(
             crate::filter::ST_MODEL_NOT_FOUND,
-            "DPDFNet モデルが見つかりません (探索先: C:\\ProgramData\\obs-studio\\plugins\\dpdfnet_voice\\data\\models)",
+            "DPDFNet モデルが見つかりません (探索先: C:\\ProgramData\\obs-studio\\plugins\\obs_noise_suppressor\\data\\models)",
         );
         let mut panel = Panel::new(Arc::clone(&shared), std::ptr::null_mut(), 1.0);
         panel.dib = Some(unsafe { Dib::new(620, 340) }.expect("DIB"));

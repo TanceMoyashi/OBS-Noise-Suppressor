@@ -6,7 +6,7 @@
 
 - OBS の設定 → 音声 → **サンプルレート = 48 kHz**（本プラグインは 48 kHz 専用。
   それ以外ではパススルー）
-- `install.ps1` でインストール済み（`%ProgramData%\obs-studio\plugins\dpdfnet_voice`）
+- `install.ps1` でインストール済み（`%ProgramData%\obs-studio\plugins\obs_noise_suppressor`）
 
 ---
 
@@ -95,9 +95,9 @@ cd obs_plugin
 ### 期待する出力（このマシンでの実測）
 
 ```text
-[dpdfnet-voice] module loaded (libobs api 0x20020002, obs_source_info 424 bytes, ort api 17)
-[dpdfnet-voice] onnxruntime 1.31.0 (...\plugins\dpdfnet_voice\data\dpdfnet_onnxruntime.dll) を読み込みました
-[dpdfnet-voice] status: 48 kHz / ch=2 / latency 2880 samples / dpdfnet8_48khz_hr_2out.onnx | n_fft=960 hop=480 state=90228 outputs=2
+[obs-noise-suppressor] module loaded (libobs api 0x20020002, obs_source_info 424 bytes, ort api 17)
+[obs-noise-suppressor] onnxruntime 1.31.0 (...\plugins\obs_noise_suppressor\data\dpdfnet_onnxruntime.dll) を読み込みました
+[obs-noise-suppressor] status: 48 kHz / ch=2 / latency 2880 samples / dpdfnet8_48khz_hr_2out.onnx | n_fft=960 hop=480 state=90228 outputs=2
 
 実機 lag = 2880 samples (6.000 hop, 60.0 ms) corr = 0.8165 (in_rms 0.115885 out_rms 0.027794)
 参照 vs 実機: 1256832 frames x 2 ch / max diff = 0e0 / diff rms = 0e0
@@ -114,7 +114,7 @@ test result: ok. 1 passed; 0 failed
 
 1. OBS に **メディアソース** を追加 → `plugin\test_signals\speech_tail_reverb_48k.wav`、
    **ループ ON**、ミュートでよい
-2. そのソース → **フィルタ** → `+` → **DPDFNet Voice**
+2. そのソース → **フィルタ** → `+` → **OBS Noise Suppressor**
 3. プロパティの **「パネルを開く（ノブ / メーター）」** ボタンでパネルが開く
 4. プロパティの説明欄（＝状態表示）を確認する
 
@@ -195,14 +195,14 @@ $env:DPDFNET_MODEL = 'D:\...\plugin\models\dpdfnet8_48khz_hr_2out.onnx'
 
 | 症状 | 見るところ |
 | --- | --- |
-| フィルタ一覧に「DPDFNet Voice」が出ない | インストール先（`bin\64bit\dpdfnet_voice.dll`）、OBS のログの `[dpdfnet-voice] module loaded` |
+| フィルタ一覧に「OBS Noise Suppressor」が出ない | インストール先（`bin\64bit\obs_noise_suppressor.dll`）、OBS のログの `[obs-noise-suppressor] module loaded` |
 | 音がまったく出ない | フィルタの有効/無効、ミュート、OBS のサンプルレート |
 | 状態が `48 kHz に設定してください` | OBS の設定 → 音声 → サンプルレート |
 | ノイズが消えない | メーターが動いているか、`data\models` の配置、モデル名 |
 | プツプツ切れる | OBS の統計（ドロップフレーム）、CPU。`dpdfnet8_*.onnx` をどけて dpdfnet2 に |
 | 音が 60 ms ずれる | 仕様（§0 / §2）。フィルタ無しのソースと混ぜない |
 | REVERB ノブがグレー | 1 出力モデルしか無い（`*_2out.onnx` を `data\models` に置く） |
-| **フィルタを選んだ瞬間に OBS が落ちる** | 同梱 ORT の名前を確認。`onnxruntime.dll` という名前で置くと System32 の ORT 1.17 を掴んで即死する（現在は `dpdfnet_onnxruntime.dll`）。ログに `onnxruntime 1.31.0 (…plugins\dpdfnet_voice\data\dpdfnet_onnxruntime.dll) を読み込みました` と出れば正常 |
+| **フィルタを選んだ瞬間に OBS が落ちる** | 同梱 ORT の名前を確認。`onnxruntime.dll` という名前で置くと System32 の ORT 1.17 を掴んで即死する（現在は `dpdfnet_onnxruntime.dll`）。ログに `onnxruntime 1.31.0 (…plugins\obs_noise_suppressor\data\dpdfnet_onnxruntime.dll) を読み込みました` と出れば正常 |
 | 状態が `onnxruntime を読み込めません` | 同梱 DLL の配置・サイズ。`DPDFNET_ORT` で明示指定も可 |
 | パネルが開かない | OBS のログに `パネルを開けません:` が出ていないか。プロパティのボタンをもう一度押す |
 | パネルが残ったまま OBS が終了しない | モジュールのアンロードで `ui::shutdown` が 2 秒待って畳む。それでも残る場合はログを確認 |
@@ -232,8 +232,8 @@ $env:DPDFNET_MODEL = 'D:\...\plugin\models\dpdfnet8_48khz_hr_2out.onnx'
 
 2026-10-17 実施。`run_obs_verify.ps1` 実行ログから:
 
-- ロード: `[dpdfnet-voice] module loaded (libobs api 0x20020002, obs_source_info 424 bytes, ort api 17)`
-- ORT: `onnxruntime 1.31.0 (C:\ProgramData\obs-studio\plugins\dpdfnet_voice\data\dpdfnet_onnxruntime.dll)`
+- ロード: `[obs-noise-suppressor] module loaded (libobs api 0x20020002, obs_source_info 424 bytes, ort api 17)`
+- ORT: `onnxruntime 1.31.0 (C:\ProgramData\obs-studio\plugins\obs_noise_suppressor\data\dpdfnet_onnxruntime.dll)`
 - 状態: `status: 48 kHz / ch=2 / latency 2880 samples / dpdfnet8_48khz_hr_2out.onnx | n_fft=960 hop=480 state=90228 outputs=2`
 - 実機遅延: `2880 samples (6.000 hop, 60.0 ms)` / 相関 `0.8165`
 - 実機 vs オフライン参照: `1256832 frames x 2 ch / max diff = 0e0 / diff rms = 0e0`（**ビット一致**）

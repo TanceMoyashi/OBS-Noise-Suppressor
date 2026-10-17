@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 SRC = Path(sys.argv[1] if len(sys.argv) > 1 else r"D:\Users\Syntac\Documents\OBS\VST3\Clear.vst3")
-OUT = Path(r"D:\Users\Syntac\Documents\デフォルトプロジェクト\clear_re\out")
+OUT = Path(r"D:\Users\Syntac\Documents\OBS-Noise-Suppressor\clear_re\out")
 MIN = 6
 
 KEYWORDS = [

@@ -1,7 +1,7 @@
 ﻿#requires -Version 5.1
 <#
 .SYNOPSIS
-    DPDFNet Voice (OBS 版) をビルドする。
+    OBS Noise Suppressor (OBS 版) をビルドする。
 
 .DESCRIPTION
     Rust 側は MSVC のリンカが要るので、先に vcvars64.bat を読んでから cargo を回す。

@@ -1,4 +1,4 @@
-//! DPDFNet Voice の DSP コア（OBS 非依存）。
+//! OBS Noise Suppressor の DSP コア（OBS 非依存）。
 //!
 //! 移植元は VST3 版の JUCE 非依存部分:
 //!   `VorbisStft` / `ModelMeta` / `DpdfNet` / `OrtRuntime`

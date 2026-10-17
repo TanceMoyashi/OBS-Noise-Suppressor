@@ -9,16 +9,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
-name = "dpdfnet-voice-obs"
-version = "0.1.0"
-dependencies = [
- "hound",
- "ort-sys",
- "realfft",
- "windows",
-]
-
-[[package]]
 name = "hound"
 version = "3.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -49,6 +39,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "obs-noise-suppressor"
+version = "0.1.0"
+dependencies = [
+ "hound",
+ "ort-sys",
+ "realfft",
+ "windows",
 ]
 
 [[package]]

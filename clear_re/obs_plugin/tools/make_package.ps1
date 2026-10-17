@@ -1,0 +1,194 @@
+﻿#requires -Version 5.1
+<#
+.SYNOPSIS
+    OBS Noise Suppressor の配布パッケージ (install.bat 同梱) を作る。
+
+.DESCRIPTION
+    既定では <project root>\dist\OBS-Noise-Suppressor\ に
+
+        install.bat                         インストーラー (ダブルクリック)
+        install.ps1                         その中身
+        uninstall.bat                       アンインストーラー
+        uninstall.ps1                       その中身
+        README.txt                          使い方 (日本語)
+        bin\64bit\obs_noise_suppressor.dll  本体
+        data\dpdfnet_onnxruntime.dll        ONNX Runtime (同梱)
+        data\models\*.onnx                  モデル
+        data\manifest.json                  OBS のプラグイン情報
+
+    を組み立て、さらに -NoZip を付けない限り 1 つの ZIP にまとめる。
+
+    bin / data の組み立ては install.ps1 に任せている (-Dest をパッケージ先に
+    向けるだけ)。だから「開発用インストーラ」と「配布パッケージ」で配置が
+    食い違うことがない。
+
+.PARAMETER Configuration
+    Debug か Release (既定 Release)。
+
+.PARAMETER OutDir
+    出力先。既定 <project root>\dist。
+
+.PARAMETER SkipBuild
+    ビルドせず既存の target\<Configuration> を使う。
+
+.PARAMETER SkipModels
+    モデルを入れない (軽いパッケージを作りたいとき)。
+
+.PARAMETER NoZip
+    ZIP を作らない。
+
+.EXAMPLE
+    .\tools\make_package.ps1
+    .\tools\make_package.ps1 -SkipBuild -NoZip
+#>
+[CmdletBinding()]
+param(
+    [ValidateSet("Debug", "Release")][string]$Configuration = "Release",
+    [string]$OutDir = "",
+    [switch]$SkipBuild,
+    [switch]$SkipModels,
+    [switch]$NoZip
+)
+
+$ErrorActionPreference = "Stop"
+$root = $PSScriptRoot              # obs_plugin\tools
+$root = Split-Path -Parent $root   # obs_plugin
+$repo = Split-Path -Parent $root   # clear_re
+
+if (-not $OutDir) { $OutDir = Join-Path (Split-Path -Parent $repo) "dist" }
+$pkg = Join-Path $OutDir "OBS-Noise-Suppressor"
+
+# --- バージョンは Cargo.toml から取る ---
+$version = "0.0.0"
+$cargo = Join-Path $root "Cargo.toml"
+if (Test-Path -LiteralPath $cargo) {
+    $m = Select-String -LiteralPath $cargo -Pattern '^\s*version\s*=\s*"([^"]+)"' |
+        Select-Object -First 1
+    if ($m) { $version = $m.Matches[0].Groups[1].Value }
+}
+
+Write-Host "パッケージ先: $pkg (v$version)" -ForegroundColor Cyan
+
+if (Test-Path -LiteralPath $pkg) {
+    Remove-Item -LiteralPath $pkg -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path $pkg | Out-Null
+
+# --- bin / data は install.ps1 に作らせる ---
+& (Join-Path $root "install.ps1") -Dest $pkg -Configuration $Configuration `
+    -SkipBuild:$SkipBuild -SkipModels:$SkipModels
+
+# --- インストーラー / アンインストーラーを同梱 ---
+foreach ($f in @("install.ps1", "uninstall.ps1", "installer\install.bat", "installer\uninstall.bat")) {
+    Copy-Item -LiteralPath (Join-Path $root $f) -Destination $pkg -Force
+}
+
+# --- README.txt (UTF-8 BOM + CRLF。メモ帳で開く) ---
+$readme = @"
+OBS Noise Suppressor v$version (Windows 64bit / OBS Studio 28 以降)
+====================================================================
+
+OBS Studio 用の音声フィルタ (ノイズ抑制 / 残響除去) です。ONNX Runtime と
+モデルを同梱しているので、追加のダウンロードは要りません。
+
+
+インストール
+------------
+1. OBS を終了します (起動中だと DLL を上書きできません)。
+2. install.bat をダブルクリックします。
+   (中身は install.ps1 です。レジストリは使いません。)
+3. OBS を起動し、音声ソースの「フィルタ」から
+   「OBS Noise Suppressor」を追加してください。
+   プロパティの「パネルを開く (ノブ / メーター)」ボタンで UI が開きます。
+
+install.bat は既定で次の場所に配置します。管理者権限は不要です。
+
+    %ProgramData%\obs-studio\plugins\obs_noise_suppressor\
+
+この場所は、通常インストーラー版・Steam 版・Microsoft Store 版の
+どれでも共通で読まれます (OBS 32.2.2 のソースで確認済み)。
+インストーラーはこれらのインストール先を検出して画面に表示します。
+
+ポータブル版の OBS だけは %ProgramData% を読まないため、検出できた
+ポータブル版には OBS 側の
+
+    <OBS ルート>\obs-plugins\64bit\
+    <OBS ルート>\data\obs-plugins\obs_noise_suppressor\
+
+にも自動でコピーします。自動検出から漏れる場合は指定してください。
+
+    install.bat -Obs "D:\obs-studio"
+
+
+アンインストール
+----------------
+uninstall.bat をダブルクリックして y を押します。
+消すのはこのプラグインだけです (OBS 本体やほかのプラグインには触れません)。
+
+    uninstall.bat -Yes                  確認なしで削除
+    uninstall.bat -Obs "D:\obs-studio"  ポータブル版も掃除
+
+
+オプション (install.bat / uninstall.bat 共通)
+---------------------------------------------
+    -Obs "フォルダ"   ポータブル版など、追加で配置 / 削除する OBS
+    -NoDetect         OBS の検出をしない
+    -Force            OBS が起動中でも強行する
+    -Dest "フォルダ"  配置先を変える (インストーラーのみ。別名 -Target)
+
+
+困ったとき
+----------
+* OBS のログ (ヘルプ → ログファイル) に
+    [obs-noise-suppressor]
+  で始まる行が出ていれば読み込まれています。
+* フィルタ一覧に 2 つ出る場合は旧名の配置が残っています。
+  install.bat をもう一度実行すると旧名のフォルダを消します。
+* 48 kHz 以外の音声ではパススルーになります。OBS の
+  設定 → 音声 → サンプリングレートを 48 kHz にしてください。
+* 内容遅延 (レイテンシ) は 2880 サンプル = 60 ms 固定です。
+* プラグインのファイルは次の 4 つだけです。手で消しても構いません。
+    bin\64bit\obs_noise_suppressor.dll   (本体)
+    data\dpdfnet_onnxruntime.dll         (ONNX Runtime)
+    data\models\*.onnx                   (モデル)
+    data\manifest.json
+
+
+ライセンス
+----------
+* このプラグイン本体 (Rust で書いた部分): GPL-2.0-or-later
+* ONNX Runtime (dpdfnet_onnxruntime.dll): MIT License (Microsoft)
+* DPDFNet モデル (*.onnx): 同梱モデルのライセンスに従います
+
+詳しくはリポジトリの clear_re\obs_plugin\README.md を参照してください。
+"@
+$readme = $readme -replace "`r?`n", "`r`n"
+$readmePath = Join-Path $pkg "README.txt"
+[System.IO.File]::WriteAllText($readmePath, $readme, (New-Object System.Text.UTF8Encoding($true)))
+
+# --- 一覧 ---
+Write-Host ""
+Get-ChildItem -LiteralPath $pkg -Recurse -File |
+    Sort-Object FullName |
+    ForEach-Object {
+        $rel = $_.FullName.Substring($pkg.Length + 1)
+        Write-Host ("  {0,-46} {1,12:N0}" -f $rel, $_.Length)
+    }
+
+$totalMB = [math]::Round(((Get-ChildItem -LiteralPath $pkg -Recurse -File |
+    Measure-Object -Property Length -Sum).Sum / 1MB), 2)
+Write-Host ""
+Write-Host "合計 $totalMB MB" -ForegroundColor Green
+
+if ($NoZip) { return }
+
+# --- ZIP (Compress-Archive ではなく .NET を使う: PS5.1 の 2GB 制限と
+#     モジュール読み込みトラブルを避ける) ---
+$zip = Join-Path $OutDir ("OBS-Noise-Suppressor-{0}-win64.zip" -f $version)
+if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+[System.IO.Compression.ZipFile]::CreateFromDirectory(
+    $pkg, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $true)
+
+$zipMB = [math]::Round(((Get-Item -LiteralPath $zip).Length / 1MB), 2)
+Write-Host "ZIP: $zip ($zipMB MB)" -ForegroundColor Green

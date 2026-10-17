@@ -1,7 +1,7 @@
 ﻿#requires -Version 5.1
 <#
 .SYNOPSIS
-    OBS 実機で DPDFNet Voice を回して、遅延と DSP を数値で確認する。
+    OBS 実機で OBS Noise Suppressor を回して、遅延と DSP を数値で確認する。
 
 .DESCRIPTION
     やること:
@@ -311,8 +311,8 @@ try {
     if ($logBefore -and $log.FullName -eq $logBefore.FullName) {
         Write-Warning "新しいログが見つかりません（OBS が起動していない？）"
     }
-    Write-Host "`n=== $($log.Name): dpdfnet / dump / 音声まわり ===" -ForegroundColor Cyan
-    Get-Content $log.FullName | Select-String -Pattern 'dpdfnet|DPDFNet|dump:|status:|Audio|audio|error|Error|warning' |
+    Write-Host "`n=== $($log.Name): obs-noise-suppressor / dump / 音声まわり ===" -ForegroundColor Cyan
+    Get-Content $log.FullName | Select-String -Pattern 'obs-noise-suppressor|noise-suppressor|dump:|status:|Audio|audio|error|Error|warning' |
         Select-Object -Last 50 | ForEach-Object { $_.Line }
 } finally {
     # --- 9) OBS を閉じる（`destroy` が走って WAV ヘッダが確定する） ---

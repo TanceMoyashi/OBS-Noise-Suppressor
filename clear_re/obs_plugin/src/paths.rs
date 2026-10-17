@@ -5,7 +5,7 @@
 //! `models/` を探していたが、OBS では
 //!
 //! ```text
-//! <plugin root>/bin/64bit/dpdfnet_voice.dll   ← ここ
+//! <plugin root>/bin/64bit/obs_noise_suppressor.dll   ← ここ
 //! <plugin root>/data/models/*.onnx            ← obs_module_file() の既定
 //! ```
 //!
@@ -36,7 +36,7 @@ pub const MODEL_FILE_NAMES: [&str; 4] = [
 /// それを避けるため、読み込みは必ず絶対パス + `LOAD_WITH_ALTERED_SEARCH_PATH`。
 pub const ORT_DLL_NAMES: [&str; 2] = ["dpdfnet_onnxruntime.dll", "onnxruntime.dll"];
 
-/// 自分自身 (`dpdfnet_voice.dll`) が置かれているディレクトリ。
+/// 自分自身 (`obs_noise_suppressor.dll`) が置かれているディレクトリ。
 pub fn own_dll_dir() -> Option<PathBuf> {
     unsafe extern "system" fn marker() {}
 

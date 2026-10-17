@@ -1,4 +1,4 @@
-//! DPDFNet Voice — OBS Studio ネイティブ音声フィルタ（Rust 実装）。
+//! OBS Noise Suppressor — OBS Studio ネイティブ音声フィルタ（Rust 実装）。
 //!
 //! 旧 VST3 + atkAudio 構成を置き換えるもの。DSP は JUCE 非依存だった
 //! `clear_re/plugin/src` からそのまま移植している（`src/dsp/` 以下）。
@@ -27,6 +27,9 @@ use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 /// フィルタの識別子。
+///
+/// **改名後もこの ID は変えない。** OBS のシーンコレクションはフィルタを
+/// この ID で保存しているため、変更すると既存シーンのフィルタが消える。
 const FILTER_ID: &CStr = c"dpdfnet_voice_filter";
 
 /// `enum obs_icon_type` の `OBS_ICON_TYPE_AUDIO_INPUT`。
@@ -147,7 +150,7 @@ pub extern "C" fn obs_module_load() -> bool {
 
 #[no_mangle]
 pub extern "C" fn obs_module_description() -> *const c_char {
-    c"DPDFNet Voice - speech enhancement (denoise / dereverb), OBS native".as_ptr()
+    c"OBS Noise Suppressor - speech enhancement (denoise / dereverb), OBS native".as_ptr()
 }
 
 /// モジュールのアンロード。
@@ -164,5 +167,5 @@ pub extern "C" fn obs_module_unload() {
 
 #[no_mangle]
 pub extern "C" fn obs_module_name() -> *const c_char {
-    c"DPDFNet Voice".as_ptr()
+    c"OBS Noise Suppressor".as_ptr()
 }

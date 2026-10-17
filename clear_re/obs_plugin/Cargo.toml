@@ -1,12 +1,14 @@
 [package]
-name = "dpdfnet-voice-obs"
+name = "obs-noise-suppressor"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "DPDFNet Voice - OBS Studio native audio filter (Rust)"
+description = "OBS Noise Suppressor - OBS Studio native audio filter (Rust)"
 
 [lib]
-name = "dpdfnet_voice"
+# cdylib 名 = OBS が読む DLL 名。ProgramData 配置ではフォルダ名と一致させる必要がある
+# (OBS の find_modules_in_path が `<dir>/bin/64bit/<dir>.dll` を組み立てるため)。
+name = "obs_noise_suppressor"
 crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 

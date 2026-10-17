@@ -318,10 +318,10 @@ extern "C" {
 // ログヘルパ
 // --------------------------------------------------------------------------
 
-/// `blog()` を呼ぶ可変長ヘルパ。書式は固定の `"[dpdfnet-voice] %s"`。
+/// `blog()` を呼ぶ可変長ヘルパ。書式は固定の `"[obs-noise-suppressor] %s"`。
 pub fn log(level: c_int, message: &std::ffi::CStr) {
     unsafe {
-        blog(level, c"[dpdfnet-voice] %s".as_ptr(), message.as_ptr());
+        blog(level, c"[obs-noise-suppressor] %s".as_ptr(), message.as_ptr());
     }
 }
 

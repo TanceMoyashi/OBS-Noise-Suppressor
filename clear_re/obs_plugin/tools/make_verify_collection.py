@@ -6,7 +6,7 @@
 * `<scenes>/dpdfnet-verify.json`
   - シーン 1 つ (`verify`)
   - メディアソース 1 つ (`probe`): 指定 WAV をループ再生（音声のみ）
-  - `probe` に **DPDFNet Voice フィルタ**を挿す（`--no-filter` で外せる）
+  - `probe` に **OBS Noise Suppressor フィルタ**を挿す（`--no-filter` で外せる）
   - グローバル音声デバイスは入れない（余計な音を混ぜないため）
 * `<profiles>/dpdfnet-verify/basic.ini`
   - 48 kHz / Stereo（プラグインの前提）だけを固定した専用プロファイル
@@ -27,7 +27,7 @@ from pathlib import Path
 # OBS が保存する `prev_ver`（32.2.2）。互換のため合わせておく。
 PREV_VER = 537001986
 FILTER_ID = "dpdfnet_voice_filter"
-FILTER_NAME = "DPDFNet Voice"
+FILTER_NAME = "OBS Noise Suppressor"
 
 # フィルタの既定値（src/dsp/params.rs と一致させる）。
 DEFAULT_SETTINGS = {

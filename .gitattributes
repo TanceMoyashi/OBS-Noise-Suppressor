@@ -1,0 +1,18 @@
+# 改行コードの取り扱い
+#
+# *.bat は必ず CRLF でチェックアウトする。cmd のパーサは LF のみの
+# バッチファイルで行を見失い、日本語の行をコマンドとして実行してしまう。
+*.bat text eol=crlf
+
+# PowerShell は LF でも動くが、揃えておく。
+*.ps1 text eol=crlf
+
+# バイナリ (改行変換・差分の対象外)
+*.onnx binary
+*.dll binary
+*.lib binary
+*.exp binary
+*.wav binary
+*.png binary
+*.bmp binary
+*.zip binary

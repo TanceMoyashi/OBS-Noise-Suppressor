@@ -1,4 +1,9 @@
-# DPDFNet Voice (作業名)
+# DPDFNet Voice (作業名) — 旧 VST3 版
+
+> **この VST3 版はもう保守しません。** 現行の OBS 用プラグインは
+> `clear_re/obs_plugin/`（表示名 **OBS Noise Suppressor**、モジュール名
+> `obs_noise_suppressor`）です。プロジェクト名も **OBS-Noise-Suppressor** に
+> 変えました。このフォルダは DSP の移植元として残しています。
 
 OBS (atkAudio 経由) で使う個人用 VST3。**Supertone Clear の公開機能仕様を参考にした自作プラグイン**であり、
 Clear のバイナリやモデルには一切依存していない。
