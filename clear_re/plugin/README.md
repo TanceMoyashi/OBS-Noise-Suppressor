@@ -297,3 +297,21 @@ python tools\sim_stream.py --model models\dpdfnet2_48khz_hr.onnx --wav test_sign
 - `Voice` は暫定実装（学習された制御ではない）。
 - 解析の初期履歴（1 hop 分）はゼロ埋め（訓練時は `pad_mode="reflect"`）。ストリーム先頭 20 ms のみ影響。
 - ループバックや再利用時に `reset()` を呼ぶ（ホストのトランスポート停止では呼ばれない場合がある）。
+
+## 11. ライセンス / クレジット
+
+同梱物:
+
+| コンポーネント | ライセンス | 備考 |
+| --- | --- | --- |
+| `third_party/kissfft/` | BSD-3-Clause | `third_party/kissfft/COPYING` を同梱 |
+| `models/*.onnx` | Apache-2.0 | `Ceva-IP/DPDFNet`（Hugging Face）由来 |
+| ONNX Runtime（別途入手、`dpdfnet_onnxruntime.dll`） | MIT | Microsoft |
+
+ビルド時に取得するもの（リポジトリには含まない）:
+
+| コンポーネント | ライセンス |
+| --- | --- |
+| JUCE 8（`FetchContent`） | AGPLv3 または商用 |
+| VST3 SDK（JUCE 経由で取得） | GPLv3 または Steinberg のデュアルライセンス |
+

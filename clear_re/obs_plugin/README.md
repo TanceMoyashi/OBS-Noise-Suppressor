@@ -146,3 +146,21 @@ OBS を起動せずに済む DSP の検証は `build.ps1 -Tests` で回せます
 - VST3 版（`clear_re/plugin/`）はもう保守しません。OBS ではこのプラグインを使います。
 - 旧 VST3 の同梱 ORT とモデルはそのまま流用できます（探索先に入れてあります）。
   atkAudio の VST3 検索パス設定は不要になります。
+
+## ライセンス / クレジット
+
+本プラグインが利用・同梱しているものは次のとおりです。**同梱物のライセンスは
+それぞれの配布元の条項に従います。**
+
+| コンポーネント | 用途 | ライセンス | 配布元 |
+| --- | --- | --- | --- |
+| DPDFNet ONNX モデル（`models/*.onnx`） | 音声強調の推論 | Apache-2.0 | `Ceva-IP/DPDFNet`（Hugging Face） |
+| ONNX Runtime 1.31.0（`dpdfnet_onnxruntime.dll`） | 推論エンジン | MIT | Microsoft |
+| OBS Studio / libobs | ホスト。`obs.dll` の C API を利用 | GPL-2.0-or-later | OBS Project |
+
+- モデルを再配布する場合は Apache-2.0 の条件（著作権表示・ライセンス文の同梱、
+  変更の明示）を満たしてください。
+- OBS 本体は GPL-2.0-or-later です。libobs の API にリンクして配布するプラグインは、
+  互換ライセンス（例: GPL-2.0-or-later）を付けるのが安全です。
+- 本リポジトリの自作コードのライセンスは現状**未設定**です（推奨: GPL-2.0-or-later）。
+
