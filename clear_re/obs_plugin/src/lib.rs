@@ -15,6 +15,7 @@ mod dsp;
 mod dump;
 mod ffi;
 mod filter;
+mod log;
 mod meter;
 mod paths;
 mod preset;
@@ -133,6 +134,13 @@ pub extern "C" fn obs_module_load() -> bool {
         unsafe {
             obs_register_source_s(&FILTER_INFO, std::mem::size_of::<obs_source_info>());
         }
+        // 専用ログを最初に開く。これ以降、LOG_DEBUG 以外はファイルにも残る。
+        let log_path = log::init();
+        obs_log!(
+            LOG_INFO,
+            "OBS Noise Suppressor v{} を読み込みました",
+            env!("CARGO_PKG_VERSION")
+        );
         obs_log!(
             LOG_INFO,
             "module loaded (libobs api {:#010x}, obs_source_info {} bytes, ort api {})",
@@ -140,6 +148,16 @@ pub extern "C" fn obs_module_load() -> bool {
             std::mem::size_of::<obs_source_info>(),
             dsp::ort::api_version()
         );
+        if let Some(dir) = paths::own_dll_dir() {
+            obs_log!(LOG_INFO, "dll: {}", dir.display());
+        }
+        match &log_path {
+            Some(p) => obs_log!(LOG_INFO, "log file: {}", p.display()),
+            None => obs_log!(
+                LOG_WARNING,
+                "専用ログファイルを作れませんでした (OBS 標準ログのみになります)"
+            ),
+        }
         true
     })) {
         Ok(v) => v,

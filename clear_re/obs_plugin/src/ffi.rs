@@ -354,6 +354,9 @@ pub fn log(level: c_int, message: &std::ffi::CStr) {
 
 pub fn log_cstr(level: c_int, message: &std::ffi::CStr) {
     log(level, message);
+    // OBS 標準ログに加えて、プラグイン専用のログファイルにも残す。
+    // ファイルに書くレベルは `log.rs` が決める（LOG_DEBUG は OBS 側だけ）。
+    crate::log::mirror_from_obs(level, &message.to_string_lossy());
 }
 
 /// マクロで包むための簡易版。

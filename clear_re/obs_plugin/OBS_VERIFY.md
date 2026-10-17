@@ -205,6 +205,7 @@ $env:DPDFNET_MODEL = 'D:\...\plugin\models\dpdfnet8_48khz_hr_2out.onnx'
 
 | 症状 | 見るところ |
 | --- | --- |
+| 何が起きたか分からない | 専用ログ `%APPDATA%\obs-studio\plugin_config\obs_noise_suppressor\obs_noise_suppressor.log`（エラー / 警告 / 起動情報。OBS 標準ログと同内容） |
 | フィルタ一覧に「OBS Noise Suppressor」が出ない | インストール先（`bin\64bit\obs_noise_suppressor.dll`）、OBS のログの `[obs-noise-suppressor] module loaded` |
 | 音がまったく出ない | フィルタの有効/無効、ミュート、OBS のサンプルレート |
 | 状態が `48 kHz に設定してください` | OBS の設定 → 音声 → サンプルレート |
@@ -286,3 +287,22 @@ $env:DPDFNET_MODEL = 'D:\...\plugin\models\dpdfnet8_48khz_hr_2out.onnx'
 - ビルド警告: Release / Debug ともに **0 件**
 - インストール済み DLL の SHA256: `d4d480e502f94b82fc7876d61935f83a07706e8f7a9fd0687910842e7a4095e2`
   （ビルド出力と一致、1,586,176 bytes）
+
+### v0.2.0 + ログ出力（2026-10-18 実施 / 版は v0.2.0 のまま）
+
+`run_obs_verify.ps1` をビルド + インストール込みで再実行（専用ログの追加後）:
+
+- `%APPDATA%\obs-studio\plugin_config\obs_noise_suppressor\obs_noise_suppressor.log` が
+  自動で作られること（`plugin_config` 側にフォルダが無い状態から作成された）。
+  中身は 14 行で、`<時刻> [LEVEL] 本文` がモジュール読み込み → フィルタ生成 →
+  ORT 読み込み → `status:` → フィルタ破棄 → モジュール解放まで並ぶ
+- 同じ行が OBS 標準ログにも `[obs-noise-suppressor]` 付きで出ること
+- 実機遅延 `2880 samples (6.000 hop, 60.0 ms)` / 実機 vs オフライン参照が
+  `1248640 frames x 2 ch / max diff = 0e0`（**ビット一致**）で、ログ追加が
+  音声処理に影響していないこと
+- 自動テスト: `cargo test --release --lib` → **54 passed / 0 failed**
+  （`obs_log!` → ファイルの経路、世代退避、連続重複の間引き、上限での停止、
+  複数行メッセージの整形を含む）
+- ビルド警告: Release / Debug ともに **0 件**
+- インストール済み DLL の SHA256: `a6bf166443166e6e8ae54f4ceb22e36bc98bb5a1b39ff60895236419965ee3ca`
+  （ビルド出力と一致、1,608,192 bytes）

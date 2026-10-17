@@ -28,6 +28,7 @@ JUCE 非依存だった VST3 版のコードをそのまま移植しています
 | モデル | プロパティで 自動 / 高品質 (dp8) / 軽量 (dp2) を選択（切り替えは数十 ms の無音） |
 | 音声スレッド | アロケーションなし（テンソル・バッファは事前確保、`IoBinding` で再利用） |
 | パニック | FFI 境界ごとに `catch_unwind`。落ちずにパススルーへ退避 |
+| ログ | エラー / 警告 / 起動情報を専用ファイル `obs_noise_suppressor.log` に常時記録（OBS 標準ログにも同じ内容が出ます） |
 
 > **エンジンの生成タイミング**
 > libobs はフィルタの `activate` を「親ソースのアクティブ状態が変わった時」しか
@@ -279,6 +280,42 @@ OBS には音声フィルタ用の汎用遅延補正がないため、同じシ�
 ソースと混ぜると 60 ms ずれて聞こえます。マイク 1 本を通すだけの使い方
 （自分の声を直接モニターしない）なら実害はありません。
 
+### ログ（エラー / 警告 / 起動情報）
+
+不具合を後から追えるように、プラグイン専用のログファイルを**常に**書きます
+（設定はありません）。OBS 標準のログ（`%APPDATA%\obs-studio\logs\*.txt`）にも
+同じ内容が `[obs-noise-suppressor]` 付きで出ます。
+
+```text
+%APPDATA%\obs-studio\plugin_config\obs_noise_suppressor\obs_noise_suppressor.log
+```
+
+実際の中身（このマシンで OBS に音を 25 秒流した例。パネルを開いたときの行は省略）:
+
+```text
+2026-10-18 04:11:38.739 [INFO] OBS Noise Suppressor v0.2.0 を読み込みました
+2026-10-18 04:11:38.739 [INFO] module loaded (libobs api 0x20020002, obs_source_info 424 bytes, ort api 17)
+2026-10-18 04:11:38.739 [INFO] dll: C:\ProgramData\obs-studio\plugins\obs_noise_suppressor\bin\64bit
+2026-10-18 04:11:38.739 [INFO] log file: C:\Users\<user>\AppData\Roaming\obs-studio/plugin_config/obs_noise_suppressor/obs_noise_suppressor.log
+2026-10-18 04:11:38.880 [INFO] filter created (ambience 0.50, voice 0.00 dB, reverb 0.00)
+2026-10-18 04:11:38.903 [INFO] onnxruntime 1.31.0 (…\plugins\obs_noise_suppressor\data\dpdfnet_onnxruntime.dll) を読み込みました
+2026-10-18 04:11:39.189 [INFO] status: 48 kHz / ch=2 / latency 2880 samples / dpdfnet8_48khz_hr_2out.onnx | n_fft=960 hop=480 state=90228 outputs=2
+2026-10-18 04:12:05.230 [INFO] filter destroyed
+2026-10-18 04:12:05.993 [INFO] module unloaded
+```
+
+| 項目 | 内容 |
+| --- | --- |
+| 記録するレベル | `ERROR` / `WARNING` / `INFO`。`LOG_DEBUG` は OBS 標準ログにだけ出します |
+| 起動情報 | バージョン / libobs API / ONNX Runtime の版とパス / 読み込んだ DLL / 使ったモデル / サンプルレート / 遅延 |
+| 世代管理 | 1 MB を超えていたら、開くときに `obs_noise_suppressor.log.1` へ退避（残すのは最新 2 つ） |
+| 同じ警告の連続 | 間引きます（2 / 4 / 8 … 回目だけ記録）。毎フレーム同じ警告が出ても溢れません |
+| 書けないとき | 音声処理は止めません（そのままパススルーで動きます） |
+| ON/OFF | 常時 ON（プロパティに設定はありません） |
+
+ただのテキストなので、OBS を起動していなくてもメモ帳で開けます。不具合を
+報告するときは、このファイル（または OBS 標準ログ）を添えてください。
+
 ## ファイル構成
 
 ```text
@@ -296,6 +333,7 @@ obs_plugin/
     ui.rs                      自前 Win32 パネル（GDI で全部描く）+ スナップショットテスト
     meter.rs                   針 / ピークホールド / GR の弾道（実機 VU 準拠）
     preset.rs                  メモリー 1 〜 8 のデータ層（依存なしの自前 JSON）
+    log.rs                     専用ログファイル（エラー / 警告 / 起動情報。世代退避つき）
     paths.rs                   自分の DLL / ORT / モデルの探索
     dump.rs                    開発用: 実機の入出力を WAV に落とす（環境変数で有効化）
     dsp/

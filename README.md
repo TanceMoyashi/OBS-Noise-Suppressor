@@ -51,6 +51,7 @@ ONNX Runtime と DPDFNet モデルを同梱した Windows x64 版で、追加の
 | インストーラー | レジストリ不使用 / 管理者権限不要 / アンインストーラー同梱 |
 | 音声スレッド | アロケーションなし（テンソル・バッファは事前確保し `IoBinding` で再利用） |
 | 堅牢性 | FFI 境界ごとに `catch_unwind`。落ちずにパススルーへ退避 |
+| ログ | エラー / 警告 / 起動情報を専用ファイルに常時記録（OBS 標準ログにも同じ内容が出ます） |
 
 ## パネル
 
@@ -129,7 +130,30 @@ ONNX Runtime とモデルは `vendor/` と `clear_re/plugin/models/` に入っ�
 - OBS Studio 32.2.2 / Windows x64 / ONNX Runtime 1.31.0（`ORT_API_VERSION = 17`）
 - 実機 vs オフライン参照が**ビット一致**（998,784 frames × 2 ch / 最大差 `0e0`）
 - 遅延 `2880 samples (6.000 hop, 60.0 ms)` 固定
-- `cargo test --release --lib` → **38 passed / 0 failed**、ビルド警告 0 件
+- `cargo test --release --lib` → **54 passed / 0 failed**、ビルド警告 0 件
+
+## ログ
+
+不具合を後から追えるように、専用のログファイルを**常に**書きます（設定はありません）。
+OBS 標準のログ（`%APPDATA%\obs-studio\logs\*.txt`）にも同じ内容が出ます。
+
+```text
+%APPDATA%\obs-studio\plugin_config\obs_noise_suppressor\obs_noise_suppressor.log
+```
+
+```text
+2026-10-18 04:11:38.739 [INFO] OBS Noise Suppressor v0.2.0 を読み込みました
+2026-10-18 04:11:38.739 [INFO] dll: C:\ProgramData\obs-studio\plugins\obs_noise_suppressor\bin\64bit
+2026-10-18 04:11:38.880 [INFO] filter created (ambience 0.50, voice 0.00 dB, reverb 0.00)
+2026-10-18 04:11:39.189 [INFO] status: 48 kHz / ch=2 / latency 2880 samples / dpdfnet8_48khz_hr_2out.onnx
+2026-10-18 04:12:05.230 [INFO] filter destroyed
+```
+
+記録するのは `ERROR` / `WARNING` / `INFO` の 3 段（`LOG_DEBUG` は OBS 標準ログだけ）で、
+起動時の構成（バージョン / ONNX Runtime の版とパス / 読み込んだ DLL / 使ったモデル /
+サンプルレート / 遅延）も残ります。1 MB を超えたら開くときに `.1` へ退避して最新 2 世代
+だけを残し、毎フレーム同じ警告が出るような場合も間引きます。書き込めない環境でも
+音声処理は止めません。
 
 ## ライセンス
 
