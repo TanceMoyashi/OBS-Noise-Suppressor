@@ -525,7 +525,9 @@ OBS のレートを変えて回すときはハーネスに `-SampleRate` を渡�
 - ビルドした DLL: 1,696,256 bytes / SHA256
   `05ce800cc130149aaf882e736b321d0fd80334ba309a13739eb7bfbaece4f81f`
   （`target\release` とインストール済みがバイト一致）
-- 配布 ZIP: `OBS-Noise-Suppressor-0.3.0-win64.zip`（下の節で更新）
+- 配布 ZIP: `OBS-Noise-Suppressor-0.3.0-win64.zip`（53,457,322 bytes、SHA256
+  `ff8854e89eb60dc706db90338e15947c6d837eda4fa6bad60c310a13b38f87fe`。
+  上の節の ZIP（`e74dc1e0…` = パネル改修版）を置き換えたもの）
 
 ## 7. ライセンス表示（GitHub の判定）
 
