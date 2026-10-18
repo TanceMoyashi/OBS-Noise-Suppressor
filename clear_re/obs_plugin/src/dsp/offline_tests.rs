@@ -478,6 +478,9 @@ fn offline_latency_and_channel_consistency() {
 /// 一致するはずで、ずれていれば「OBS 経路のどこか（チャンネル、ブロック、
 /// フォーマット変換）がおかしい」と分かる。
 ///
+/// サンプルレートは WAV から読み取るので、48 kHz 以外（レート変換経路）でも
+/// そのまま使える。期待遅延はエンジン自身の申告（2880 @ 48 kHz + 変換ぶん）から出す。
+///
 /// 実行:
 /// ```text
 /// set DPDFNET_LIVE_DUMP=C:\...\live\dump
@@ -503,56 +506,75 @@ fn live_dump_matches_reference() {
     let (x, sr, ch) = read_wav_planar_loose(&p_in).expect("ダンプ (_in.wav) を読めない");
     let (y, sr_out, ch_out) = read_wav_planar_loose(&p_out).expect("ダンプ (_out.wav) を読めない");
 
-    assert_eq!(sr, 48_000, "48 kHz でない");
-    assert_eq!(sr_out, 48_000, "48 kHz でない");
+    assert_eq!(sr, sr_out, "入出力のサンプルレートが違う ({sr} vs {sr_out})");
     assert_eq!(ch, ch_out, "入出力のチャンネル数が違う");
 
     let frames_in = x[0].len();
     let frames_out = y[0].len();
     eprintln!(
-        "live dump: {} / {} ch / in {} frames / out {} frames",
+        "live dump: {} / {} Hz / {} ch / in {} frames / out {} frames",
         p_in.display(),
+        sr,
         ch,
         frames_in,
         frames_out
     );
-    assert!(frames_in > 48_000, "ダンプが短すぎる（フィルタが回っていない可能性）");
+    assert!(
+        frames_in > sr as usize,
+        "ダンプが短すぎる（フィルタが回っていない可能性）"
+    );
 
     // ---- 1) 実機の遅延（in → out） ----
     let n = frames_in.min(frames_out);
-    assert!(n > 48_000);
+    assert!(n > sr as usize);
     let (lag, corr) = estimate_lag(&x[0][..n], &y[0][..n], 24_000, 16);
     eprintln!(
-        "実機 lag = {lag} samples ({:.3} hop, {:.1} ms) corr = {corr:.4} (in_rms {:.6} out_rms {:.6})",
-        lag as f64 / 480.0,
-        lag as f64 / 48_000.0 * 1000.0,
+        "実機 lag = {lag} samples ({:.1} ms) corr = {corr:.4} (in_rms {:.6} out_rms {:.6})",
+        lag as f64 / f64::from(sr) * 1000.0,
         rms(&x[0][..n]),
         rms(&y[0][..n])
     );
     assert!(corr > 0.3, "相関が低すぎる ({corr})");
-    assert_eq!(
-        lag,
-        engine::K_LATENCY_HOPS * 480,
-        "実機の遅延が {} サンプルではない",
-        engine::K_LATENCY_HOPS * 480
-    );
 
     // ---- 2) 同じ入力をオフラインで回して _out と比較 ----
     let ch_used = ch.clamp(1, 2);
     let mut eng = engine::build(
         ch_used,
-        48_000,
+        sr,
         &model,
         std::slice::from_ref(&ort_dir),
         Arc::new(Meters::new()),
     )
     .expect("エンジン構築に失敗");
 
+    // 期待遅延はエンジン自身の申告から出す。48 kHz ならちょうど 2880 サンプル
+    // （変換段なし）、それ以外はレート変換ぶんが乗る（例: 96 kHz で約 5989）。
+    let want_ms = eng.latency_samples as f64 / f64::from(super::INTERNAL_SAMPLE_RATE) * 1000.0
+        + f64::from(eng.added_latency_ms);
+    let want_lag = (want_ms * f64::from(sr) / 1000.0).round() as i64;
+    eprintln!(
+        "期待 lag = {want_lag} samples ({want_ms:.1} ms = 2880@48k + SRC {:.2} ms, {} Hz)",
+        eng.added_latency_ms, sr
+    );
+    if sr as f32 == super::INTERNAL_SAMPLE_RATE {
+        assert_eq!(
+            lag,
+            engine::K_LATENCY_HOPS * 480,
+            "実機の遅延が {} サンプルではない",
+            engine::K_LATENCY_HOPS * 480
+        );
+    } else {
+        assert!(
+            (lag as i64 - want_lag).abs() <= 4,
+            "実機の遅延が {want_lag} 付近でない (実測 {lag})"
+        );
+    }
+
     let input: Vec<Vec<f32>> = x[..ch_used].to_vec();
     let ys = run_stream(&mut eng, &input, 1024, engine::ParamSnapshot::default());
 
     let m = ys[0].len().min(frames_out);
-    assert!(m > 48_000, "比較できる長さが足りない");
+    assert!(m > sr as usize, "比較できる長さが足りない");
     let mut max_diff = 0.0f32;
     let mut sum_sq = 0.0f64;
     for ch_i in 0..ch_used {

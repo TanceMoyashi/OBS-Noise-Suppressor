@@ -195,12 +195,28 @@ $env:DPDFNET_MODEL = 'D:\...\plugin\models\dpdfnet8_48khz_hr_2out.onnx'
 .\build.ps1 -Tests -TestFilter live_dump -NoCapture
 ```
 
-| 測定結果 | 判定 |
+OBS のレートを変えて回すときはハーネスに `-SampleRate` を渡します（検証用
+プロファイルの `SampleRate` に反映され、ダンプもそのレートで出ます）:
+
+```powershell
+.\tools\run_obs_verify.ps1 -SampleRate 96000
+```
+
+`live_dump_matches_reference` は**ダンプ WAV のサンプルレートを読んで**期待遅延を
+エンジンの申告から計算するので、48 kHz でもそれ以外でも同じ手順で判定できます。
+
+| 測定結果（48 kHz） | 判定 |
 | --- | --- |
 | `実機 lag = 2880 samples` | ✅ 設計どおり（`kLatencyHops = 6` × hop 480） |
 | `max diff = 0e0` | ✅ 実機とオフライン参照がビット一致 |
 | `max diff > 1e-4` | ❌ OBS 経路のどこか（チャンネル数 / ブロック / リセット）が怪しい |
 | 遅延が 2880 でない | ❌ `src/dsp/engine.rs` の `K_LATENCY_HOPS` とホップ処理を確認 |
+
+| 測定結果（48 kHz 以外。例: 96 kHz） | 判定 |
+| --- | --- |
+| `実機 lag = 5988 samples`（`2880@48k + SRC 2.38 ms`） | ✅ 期待値はエンジンの申告から自動計算して照合 |
+| `max diff = 0e0` | ✅ レート変換込みでビット一致 |
+| 入出力のフレーム数が不一致 / ゼロ埋めが続く | ❌ `src/dsp/engine.rs` の `Rack`（持ち越し）を確認 |
 
 ---
 
@@ -211,7 +227,7 @@ $env:DPDFNET_MODEL = 'D:\...\plugin\models\dpdfnet8_48khz_hr_2out.onnx'
 | 何が起きたか分からない | 専用ログ `%APPDATA%\obs-studio\plugin_config\obs_noise_suppressor\obs_noise_suppressor.log`（エラー / 警告 / 起動情報。OBS 標準ログと同内容） |
 | フィルタ一覧に「OBS Noise Suppressor」が出ない | インストール先（`bin\64bit\obs_noise_suppressor.dll`）、OBS のログの `[obs-noise-suppressor] module loaded` |
 | 音がまったく出ない | フィルタの有効/無効、ミュート、OBS のサンプルレート |
-| 状態が `48 kHz に設定してください` | OBS の設定 → 音声 → サンプルレート |
+| 状態が `OBS の音声が … です。この値は変換できないためパススルーします` | 想定外のレート（変換比が 1024 超など）。OBS の設定 → 音声 → サンプルレート |
 | ノイズが消えない | メーターが動いているか、`data\models` の配置、モデル名 |
 | プツプツ切れる | OBS の統計（ドロップフレーム）、CPU。`dpdfnet8_*.onnx` をどけて dpdfnet2 に |
 | 音が 60 ms ずれる | 仕様（§0 / §2）。フィルタ無しのソースと混ぜない |
@@ -320,10 +336,25 @@ $env:DPDFNET_MODEL = 'D:\...\plugin\models\dpdfnet8_48khz_hr_2out.onnx'
 
 48 kHz 以外のレートでもパススルーせず、入出力で 48 kHz へ相互変換して処理する版。
 
-> **実機（OBS）での通し確認はこの版では未実施です。** 48 kHz の処理経路は
-> v0.2.1 から 1 サンプルも変えていない（変換段を作らないため）ので、上の
-> v0.2.1 の実機結果（ビット一致・遅延 2880）はそのまま有効です。96 kHz などの
-> 実機確認は、OBS の音声設定を変えて `run_obs_verify.ps1` を回すと取れます。
+**実機（OBS）での確認を 48 kHz と 96 kHz の両方で実施しました**（OBS 32.2.2 / 25 秒
+再生。`tools/run_obs_verify.ps1` に `-SampleRate` を追加して取得）:
+
+| OBS レート | 入出力フレーム数 | 実機 lag | オフライン参照との差 |
+| --- | --- | --- | --- |
+| 48 kHz | 1,260,928 / 1,260,928（一致） | `2880 samples (60.0 ms)` | **max diff = 0e0**（ビット一致） |
+| 96 kHz | 2,521,824 / 2,521,824（一致） | `5988 samples (62.4 ms)` | **max diff = 0e0**（ビット一致） |
+
+96 kHz の行は、**配布 ZIP と同一バイトの DLL**（`install.ps1 -SkipBuild` で入れたもの）で
+取り直したもの。パッケージの中身がそのまま実機で正しく動くことを確認している。
+
+- 96 kHz の遅延はエンジンの申告どおり `2880@48k + 変換 2.38 ms = 5988 samples`
+  （オフラインの `offline_rate_conversion_96k` の 62.4 ms と一致）。
+- 96 kHz の実機出力は、同じ入力をオフラインの 96 kHz エンジンに通した結果と
+  **1 サンプルも違わない**。チャンネル・ブロック長・フォーマット変換を含めて
+  OBS 経路が正しいことが確認できた。
+- 96 kHz の実ログ:
+  `status: 96 kHz / ch=2 / latency 2880 samples (60 ms) / dpdfnet8_48khz_hr_2out.onnx | n_fft=960 hop=480 …`
+  パネルには `2 ch · 96 kHz · 遅延 2880 samples (60 ms +SRC 2.4 ms) · …` と出る。
 
 オフライン検証（`DPDFNET_MODEL=dpdfnet2_48khz_hr_2out.onnx` / `speech_tail_48k.wav`）:
 
@@ -335,10 +366,18 @@ $env:DPDFNET_MODEL = 'D:\...\plugin\models\dpdfnet8_48khz_hr_2out.onnx'
 - `rack_keeps_sample_counts_and_level`（モデル不要の変換段単体）
   - 22.05 / 44.1 / 88.2 / 96 / 192 kHz × ブロック長 1 / 7 / 480 / 1023 / 1024 / 4096 で
     入出力のサンプル数が一致、ゼロ埋めは起動直後のみ、定常で直流がそのまま通る、L/R 一致
+- `live_dump_matches_reference`（実機ダンプ照合）はサンプルレートを WAV から読むように
+  したので、48 kHz / 96 kHz のどちらでも同じ手順で確認できる
 - 自動テスト: `cargo test --release --lib` → **62 passed / 0 failed**、ビルド警告 0 件
-- 48 kHz の経路は変更なし（変換段を作らないため）。従来の実機検証
-  （`max diff = 0e0` のビット一致・遅延 2880）はそのまま有効。
-- ビルドした DLL: 1,630,208 bytes / SHA256
-  `b3cd81ef56ce02333a2f7bce2af29d066368e4d25603d1ba8483bf896fb95b6f`
-- 配布 ZIP: `OBS-Noise-Suppressor-0.3.0-win64.zip`（53,429,742 bytes、SHA256
-  `f13970ae0f1b5f116f57939ff27bce7c21c7279f581660c5fd71c0d07a191384`）
+- ビルドした DLL: 1,630,720 bytes / SHA256
+  `128097cfbaf0edb5c932d3bf026d32eb3535f3eb7cbed9224ed453e61252d616`
+  （配布 ZIP 内・インストール済みとバイト一致）
+- 配布 ZIP: `OBS-Noise-Suppressor-0.3.0-win64.zip`（53,429,804 bytes、SHA256
+  `c8657ef722149e463d90e4e825942f9172e516b3f941c4d8b986ca850b81efb3`）
+- **ハマりどころ（実際に起きた）**: `build.ps1 -Tests` はテスト用の lib しか作らず、
+  cdylib（配布 DLL）を作り直さない。バージョンを上げたあとに `make_package.ps1
+  -SkipBuild` を回すと、**古いバージョン文字列のままの DLL を梱包**してしまう
+  （v0.3.0 で実際に発生。DLL に `0.2.1` が残っていた）。いまは `make_package.ps1`
+  が梱包した DLL に `Cargo.toml` のバージョン文字列が入っているか検査し、
+  無ければ例外で止める。バージョンを上げたら必ず `build.ps1 -Configuration Release`
+  （または `install.ps1`）で cdylib を作り直すこと。

@@ -29,6 +29,10 @@
 .PARAMETER Seconds
     音を流す秒数（既定 25 秒）。
 
+.PARAMETER SampleRate
+    検証用プロファイルの OBS サンプルレート（既定 48000）。48 kHz 以外を試すと
+    レート変換経路の実機確認になる（例: -SampleRate 96000）。
+
 .PARAMETER Wav
     再生する WAV（既定は `plugin\test_signals\speech_tail_reverb_48k.wav`）。
 
@@ -54,6 +58,7 @@
 param(
     [string]$Name = "dpdfnet-verify",
     [int]$Seconds = 25,
+    [int]$SampleRate = 48000,
     [string]$Wav = "",
     [string]$WorkDir = (Join-Path $env:LOCALAPPDATA "Temp\opencode\live"),
     [switch]$NoPanel,
@@ -89,6 +94,7 @@ if (-not $Elevated -and -not (Test-Admin)) {
         "-Elevated",
         "-Name", "`"$Name`"",
         "-Seconds", "$Seconds",
+        "-SampleRate", "$SampleRate",
         "-WorkDir", "`"$WorkDir`""
     )
     if ($Wav) { $a += @("-Wav", "`"$Wav`"") }
@@ -236,12 +242,13 @@ if (-not (Stop-Obs)) {
 }
 
 # --- 3) シーンコレクション ---
-$pyArgs = @((Join-Path $root "tools\make_verify_collection.py"), "--name", $Name)
+$pyArgs = @((Join-Path $root "tools\make_verify_collection.py"), "--name", $Name,
+    "--sample-rate", "$SampleRate")
 if ($Wav) { $pyArgs += @("--wav", $Wav) }
 & $py @pyArgs
 
 if ($NoLaunch) {
-    Write-Host "`n(NoLaunch) コレクション: $collectionFile" -ForegroundColor Cyan
+    Write-Host "`n(NoLaunch) コレクション: $collectionFile ($SampleRate Hz)" -ForegroundColor Cyan
     Stop-Transcript | Out-Null
     return
 }
@@ -271,7 +278,7 @@ $logBefore = (Get-ChildItem "$logDir\*.txt" -ErrorAction SilentlyContinue |
 $exitCode = 0
 try {
     # --- 5) OBS 起動 ---
-    Write-Host "`nOBS 起動 (--multi --collection $Name)" -ForegroundColor Cyan
+    Write-Host "`nOBS 起動 (--multi --collection $Name / $SampleRate Hz)" -ForegroundColor Cyan
     Start-Process -FilePath $obsExe -WorkingDirectory $obsBin -ArgumentList @(
         "--multi", "--collection", $Name, "--profile", $Name,
         "--disable-missing-files-check", "--disable-updater"
@@ -291,7 +298,7 @@ try {
     }
     if (Test-Path -LiteralPath $dumpOut) {
         Write-Host ("ダンプ: {0:N0} bytes ({1:N1} 秒ぶん)" -f `
-            (Get-Item $dumpOut).Length, ((Get-Item $dumpOut).Length / 4 / 2 / 48000)) -ForegroundColor Green
+            (Get-Item $dumpOut).Length, ((Get-Item $dumpOut).Length / 4 / 2 / $SampleRate)) -ForegroundColor Green
     } else {
         Write-Warning "ダンプができていません（フィルタが回っていない可能性）"
         $exitCode = 2

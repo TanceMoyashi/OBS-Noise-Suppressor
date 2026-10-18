@@ -297,19 +297,19 @@ OBS には音声フィルタ用の汎用遅延補正がないため、同じシ�
 %APPDATA%\obs-studio\plugin_config\obs_noise_suppressor\obs_noise_suppressor.log
 ```
 
-実際の中身（このマシンで OBS に音を 25 秒流した例。v0.2.1 時点の記録。
+実際の中身（このマシンで OBS を **96 kHz** にして 25 秒流した例。v0.3.0 の実測。
 パネルを開いたときの行は省略）:
 
 ```text
-2026-10-18 04:23:09.949 [INFO] OBS Noise Suppressor v0.2.1 を読み込みました
-2026-10-18 04:23:09.949 [INFO] module loaded (libobs api 0x20020002, obs_source_info 424 bytes, ort api 17)
-2026-10-18 04:23:09.949 [INFO] dll: C:\ProgramData\obs-studio\plugins\obs_noise_suppressor\bin\64bit
-2026-10-18 04:23:09.949 [INFO] log file: C:\Users\<user>\AppData\Roaming\obs-studio/plugin_config/obs_noise_suppressor/obs_noise_suppressor.log
-2026-10-18 04:23:10.066 [INFO] filter created (ambience 0.50, voice 0.00 dB, reverb 0.00)
-2026-10-18 04:23:10.085 [INFO] onnxruntime 1.31.0 (…\plugins\obs_noise_suppressor\data\dpdfnet_onnxruntime.dll) を読み込みました
-2026-10-18 04:23:10.365 [INFO] status: 48 kHz / ch=2 / latency 2880 samples (60 ms) / dpdfnet8_48khz_hr_2out.onnx | n_fft=960 hop=480 state=90228 outputs=2
-2026-10-18 04:23:36.659 [INFO] filter destroyed
-2026-10-18 04:23:37.159 [INFO] module unloaded
+2026-10-18 19:56:55.078 [INFO] OBS Noise Suppressor v0.3.0 を読み込みました
+2026-10-18 19:56:55.078 [INFO] module loaded (libobs api 0x20020002, obs_source_info 424 bytes, ort api 17)
+2026-10-18 19:56:55.078 [INFO] dll: C:\ProgramData\obs-studio\plugins\obs_noise_suppressor\bin\64bit
+2026-10-18 19:56:55.079 [INFO] log file: C:\Users\<user>\AppData\Roaming\obs-studio/plugin_config/obs_noise_suppressor/obs_noise_suppressor.log
+2026-10-18 19:56:55.183 [INFO] filter created (ambience 0.50, voice 0.00 dB, reverb 0.00)
+2026-10-18 19:56:55.213 [INFO] onnxruntime 1.31.0 (…\plugins\obs_noise_suppressor\data\dpdfnet_onnxruntime.dll) を読み込みました
+2026-10-18 19:56:55.514 [INFO] status: 96 kHz / ch=2 / latency 2880 samples (60 ms) / dpdfnet8_48khz_hr_2out.onnx | n_fft=960 hop=480 state=90228 outputs=2
+2026-10-18 19:57:21.646 [INFO] filter destroyed
+2026-10-18 19:57:22.312 [INFO] module unloaded
 ```
 
 | 項目 | 内容 |
@@ -356,7 +356,7 @@ obs_plugin/
   tools/
     make_package.ps1           配布パッケージ（install.bat 同梱）を作る
     make_verify_collection.py  実機検証用のシーンコレクション生成
-    run_obs_verify.ps1         実機で回して数値で確認するハーネス
+    run_obs_verify.ps1         実機で回して数値で確認するハーネス（-SampleRate で 48 kHz 以外も）
     gen_obs_lib.ps1            vendor\obs.lib を obs.dll から作り直す
 ```
 

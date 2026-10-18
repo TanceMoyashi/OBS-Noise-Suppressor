@@ -129,10 +129,12 @@ ONNX Runtime とモデルは `vendor/` と `clear_re/plugin/models/` に入っ�
 ## 動作確認済みの環境
 
 - OBS Studio 32.2.2 / Windows x64 / ONNX Runtime 1.31.0（`ORT_API_VERSION = 17`）
-- 実機 vs オフライン参照が**ビット一致**（1,260,928 frames × 2 ch / 最大差 `0e0`）
-- 遅延 `2880 samples (6.000 hop, 60.0 ms)` 固定（48 kHz）
-- 48 kHz 以外も**レート変換して処理**（オフライン検証: 96 kHz で出力レベル差 0.05 %、
-  遅延 5989 サンプル = 62.4 ms = 60 ms + 変換 2.4 ms。`offline_rate_conversion_96k`）
+- 実機（OBS）の 48 kHz / 96 kHz の両方で、**実機 vs オフライン参照がビット一致**
+  （48 kHz: 1,260,928 frames × 2 ch、96 kHz: 2,505,440 frames × 2 ch、最大差 `0e0`）
+- 遅延 `2880 samples (6.000 hop, 60.0 ms)`（48 kHz）。96 kHz は実測
+  `5988 samples (62.4 ms)` = 60 ms + 変換 2.38 ms
+- 48 kHz 以外も**レート変換して処理**（96 kHz で出力レベル差 0.05 %、
+  `offline_rate_conversion_96k`）
 - レート変換段の単体検証: 22.05 / 44.1 / 88.2 / 96 / 192 kHz と 6 種類のブロック長
   （1 / 7 / 480 / 1023 / 1024 / 4096）で入出力のサンプル数が一致し、定常で直流が
   そのまま通る（`rack_keeps_sample_counts_and_level`）
@@ -148,19 +150,16 @@ OBS 標準のログ（`%APPDATA%\obs-studio\logs\*.txt`）にも同じ内容が�
 ```
 
 ```text
-2026-10-18 04:23:09.949 [INFO] OBS Noise Suppressor v0.2.1 を読み込みました
-2026-10-18 04:23:09.949 [INFO] dll: C:\ProgramData\obs-studio\plugins\obs_noise_suppressor\bin\64bit
-2026-10-18 04:23:10.066 [INFO] filter created (ambience 0.50, voice 0.00 dB, reverb 0.00)
-2026-10-18 04:23:10.365 [INFO] status: 48 kHz / ch=2 / latency 2880 samples (60 ms) / dpdfnet8_48khz_hr_2out.onnx
-2026-10-18 04:23:36.659 [INFO] filter destroyed
+2026-10-18 19:56:55.078 [INFO] OBS Noise Suppressor v0.3.0 を読み込みました
+2026-10-18 19:56:55.078 [INFO] dll: C:\ProgramData\obs-studio\plugins\obs_noise_suppressor\bin\64bit
+2026-10-18 19:56:55.183 [INFO] filter created (ambience 0.50, voice 0.00 dB, reverb 0.00)
+2026-10-18 19:56:55.514 [INFO] status: 96 kHz / ch=2 / latency 2880 samples (60 ms) / dpdfnet8_48khz_hr_2out.onnx | n_fft=960 hop=480 state=90228 outputs=2
+2026-10-18 19:57:21.646 [INFO] filter destroyed
 ```
 
-OBS の音声を 48 kHz 以外にしているときは、実レートと変換の遅延が出ます
-（例: `status: 96 kHz / ch=2 / latency 2880 samples (60 ms) / …`。パネルの 1 行も
-`2 ch · 96 kHz · 遅延 2880 samples (60 ms +SRC 2.4 ms) · …` になります）。
-
-（上のログは v0.2.1 の実測そのままです。バージョンの行だけは、読み込んだ版によって
-`OBS Noise Suppressor v0.3.0 を読み込みました` のように変わります）。
+`status` の先頭は OBS の実レートです（48 kHz なら `48 kHz / … / latency 2880 samples (60 ms)`。
+48 kHz 以外では上の例のように実レートが出て、パネルの 1 行にはレート変換ぶんの遅延も
+付きます: `2 ch · 96 kHz · 遅延 2880 samples (60 ms +SRC 2.4 ms) · …`）。
 
 記録するのは `ERROR` / `WARNING` / `INFO` の 3 段（`LOG_DEBUG` は OBS 標準ログだけ）で、
 起動時の構成（バージョン / ONNX Runtime の版とパス / 読み込んだ DLL / 使ったモデル /

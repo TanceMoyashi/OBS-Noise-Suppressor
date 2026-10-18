@@ -9,7 +9,8 @@
   - `probe` に **OBS Noise Suppressor フィルタ**を挿す（`--no-filter` で外せる）
   - グローバル音声デバイスは入れない（余計な音を混ぜないため）
 * `<profiles>/dpdfnet-verify/basic.ini`
-  - 48 kHz / Stereo（プラグインの前提）だけを固定した専用プロファイル
+  - サンプルレート（既定 48 kHz。`--sample-rate` で変更）と Stereo だけを
+    固定した専用プロファイル
 
 これを `run_obs_verify.ps1` から使う。生成物はユーザーの既存コレクションとは
 別ファイルなので、消せば元に戻る。
@@ -206,7 +207,7 @@ PROFILE_INI = """[General]
 Name={name}
 
 [Audio]
-SampleRate=48000
+SampleRate={sample_rate}
 ChannelSetup=Stereo
 
 [Video]
@@ -230,6 +231,7 @@ def main() -> int:
     ap.add_argument("--profiles-dir", default=None, help="既定: %%APPDATA%%\\obs-studio\\basic\\profiles")
     ap.add_argument("--no-filter", action="store_true", help="フィルタ無しの参照用コレクションを作る")
     ap.add_argument("--no-profile", action="store_true", help="プロファイルを作らない")
+    ap.add_argument("--sample-rate", type=int, default=48000, help="プロファイルの SampleRate（既定 48000）")
     args = ap.parse_args()
 
     repo = Path(__file__).resolve().parent.parent  # obs_plugin/
@@ -251,11 +253,13 @@ def main() -> int:
         pdir = profiles_dir / args.name
         pdir.mkdir(parents=True, exist_ok=True)
         ini = pdir / "basic.ini"
-        if not ini.exists():
-            ini.write_text(PROFILE_INI.format(name=args.name), encoding="utf-8")
-            print(f"profile   : {ini}")
-        else:
-            print(f"profile   : {ini} (既存)")
+        # レートを切り替えて検証するので、毎回書き直す（使い捨ての専用プロファイル）。
+        existed = ini.exists()
+        ini.write_text(
+            PROFILE_INI.format(name=args.name, sample_rate=args.sample_rate),
+            encoding="utf-8",
+        )
+        print(f"profile   : {ini}{' (上書き)' if existed else ''} / {args.sample_rate} Hz")
 
     return 0
 

@@ -79,6 +79,33 @@ New-Item -ItemType Directory -Force -Path $pkg | Out-Null
 & (Join-Path $root "install.ps1") -Dest $pkg -Configuration $Configuration `
     -SkipBuild:$SkipBuild -SkipModels:$SkipModels
 
+# --- 安全確認: 梱包した DLL がこのバージョンで作られているか ---
+# `build.ps1 -Tests` はテスト用の lib だけを作り、cdylib (この DLL) は作り直さない。
+# そのためバージョンを上げたあとに cdylib をビルドし直さないと、古いバージョンの
+# DLL をそのまま梱包してしまう (実際に v0.3.0 で起きた)。ここで中身を検査する。
+$dll = Join-Path $pkg "bin\64bit\obs_noise_suppressor.dll"
+if (-not (Test-Path -LiteralPath $dll)) {
+    throw "DLL が見つかりません: $dll"
+}
+$bytes  = [System.IO.File]::ReadAllBytes($dll)
+$needle = [System.Text.Encoding]::ASCII.GetBytes($version)
+$found  = $false
+for ($i = 0; $i -le $bytes.Length - $needle.Length; $i++) {
+    if ($bytes[$i] -ne $needle[0]) { continue }
+    $ok = $true
+    for ($j = 1; $j -lt $needle.Length; $j++) {
+        if ($bytes[$i + $j] -ne $needle[$j]) { $ok = $false; break }
+    }
+    if ($ok) { $found = $true; break }
+}
+if (-not $found) {
+    throw (@(
+        "DLL にバージョン '{0}' が埋まっていません。ビルドし直してください:"
+        "  .\build.ps1 -Configuration Release   (または install.ps1)"
+    ) -join "`n" -f $version)
+}
+Write-Host "DLL バージョン確認: $version" -ForegroundColor Green
+
 # --- インストーラー / アンインストーラーを同梱 ---
 foreach ($f in @("install.ps1", "uninstall.ps1", "installer\install.bat", "installer\uninstall.bat")) {
     Copy-Item -LiteralPath (Join-Path $root $f) -Destination $pkg -Force
