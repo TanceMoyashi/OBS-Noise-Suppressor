@@ -198,6 +198,7 @@ uninstall.bat をダブルクリックして y を押します。
 ライセンス
 ----------
 * このプラグイン本体 (Rust で書いた部分): GPL-2.0-or-later
+  Copyright (C) 2026 TanceMoyashi
   全文は同梱の LICENSE を参照してください。
 * ONNX Runtime (dpdfnet_onnxruntime.dll): MIT License (Microsoft)
 * DPDFNet モデル (*.onnx): 同梱モデルのライセンスに従います

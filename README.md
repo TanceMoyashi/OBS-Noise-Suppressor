@@ -186,7 +186,8 @@ OBS 標準のログ（`%APPDATA%\obs-studio\logs\*.txt`）にも同じ内容が�
 
 このリポジトリは **AI が生成したコードを含みます**（「AI による制作について」を参照）。**無保証**です。
 
-- このリポジトリの自作コード: **GPL-2.0-or-later**（[`LICENSE`](LICENSE)。GPL の正規の全文は [`COPYING`](COPYING)）
+- このリポジトリの自作コード: **GPL-2.0-or-later** — Copyright (C) 2026 TanceMoyashi。
+  全文は [`LICENSE`](LICENSE)（GPL-2.0 の正規のテキストをそのまま置いています）
 - ONNX Runtime（`dpdfnet_onnxruntime.dll`）: MIT License（Microsoft）
 - DPDFNet モデル（`*.onnx`）: 同梱モデルのライセンスに従います
 - 旧 VST3 版の `clear_re/plugin/third_party/kissfft`: 同フォルダの `COPYING` を参照
