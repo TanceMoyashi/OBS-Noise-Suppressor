@@ -11,7 +11,10 @@
 //!
 //! スレッドモデルとパニック処理は `filter.rs` を参照。
 
-mod dsp;
+// DSP コアは共通クレート（VST3 版と共有）。OBS 版はここから `crate::dsp::～` の
+// まま使えるように別名を付けるだけ。
+use dpdfnet as dsp;
+
 mod dump;
 mod ffi;
 mod filter;
@@ -94,6 +97,19 @@ impl UnwindSafeFallback for bool {
 // 登録
 // --------------------------------------------------------------------------
 
+/// DSP コア（別クレート）のログを、このプラグインのログへ流す。
+///
+/// コア側は出力先を知らないので、ここで 1 度だけ差し込む。OBS 標準ログと
+/// 専用ログファイルの両方に残る（`log_cstr` が面倒を見る）。
+fn dsp_log_sink(level: dsp::log::Level, msg: &str) {
+    let obs_level = match level {
+        dsp::log::Level::Info => LOG_INFO,
+        dsp::log::Level::Warning => LOG_WARNING,
+        dsp::log::Level::Error => LOG_ERROR,
+    };
+    obs_log!(obs_level, "{}", msg);
+}
+
 static FILTER_INFO: obs_source_info = {
     let mut info = obs_source_info::zeroed();
     info.id = FILTER_ID.as_ptr();
@@ -137,6 +153,8 @@ pub extern "C" fn obs_module_load() -> bool {
         }
         // 専用ログを最初に開く。これ以降、LOG_DEBUG 以外はファイルにも残る。
         let log_path = log::init();
+        // DSP コアのログも同じ場所へ流す（コアは出力先を知らない）。
+        dsp::log::set_sink(dsp_log_sink);
         obs_log!(
             LOG_INFO,
             "OBS Noise Suppressor v{} を読み込みました",

@@ -78,13 +78,13 @@ pub fn ensure_loaded(device: DeviceChoice, extra_dirs: &[PathBuf]) -> Result<&'s
         let r = load(device, extra_dirs);
         // どの DLL を掴んだかは不具合切り分けの要（System32 の ORT と取り違えやすい）。
         match &r {
-            Ok(rt) => crate::obs_log!(
-                crate::ffi::LOG_INFO,
+            Ok(rt) => crate::dsp_log!(
+                crate::log::Level::Info,
                 "onnxruntime を読み込みました: {}",
                 rt.description()
             ),
-            Err(e) => crate::obs_log!(
-                crate::ffi::LOG_WARNING,
+            Err(e) => crate::dsp_log!(
+                crate::log::Level::Warning,
                 "onnxruntime を読み込めません ({}): {}",
                 device.label(),
                 e
@@ -229,7 +229,7 @@ fn create_env(api: &'static OrtApi) -> Result<usize, String> {
     let st = unsafe {
         (api.CreateEnv)(
             logging_level(),
-            c"obs-noise-suppressor".as_ptr() as *const c_char,
+            c"dpdfnet".as_ptr() as *const c_char,
             &mut env,
         )
     };

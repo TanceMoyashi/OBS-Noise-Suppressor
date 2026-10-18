@@ -90,18 +90,38 @@ if ($Tests) {
     if ($TestFilter) { $cargoArgs += $TestFilter }
     $cargoArgs += @("--")
     if ($NoCapture) { $cargoArgs += "--nocapture" }
+
+    $cargoLine = ($cargoArgs | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join " "
+
+    # DSP コアは別クレート（VST3 版と共有）なので、そちらのテストも回す。
+    $targets = @($root)
+    $dspRoot = Join-Path (Split-Path -Parent $root) "dpdfnet"
+    if (Test-Path -LiteralPath (Join-Path $dspRoot "Cargo.toml")) {
+        $targets += $dspRoot
+    }
+
+    foreach ($t in $targets) {
+        Write-Host "==> $cargo $cargoLine" -ForegroundColor Cyan
+        Write-Host "    (in $t)" -ForegroundColor DarkGray
+        $cmd = "`"$vcvars`" >nul 2>&1 && cd /d `"$t`" && `"$cargo`" $cargoLine"
+        & cmd.exe /c $cmd
+        $code = $LASTEXITCODE
+        if ($code -ne 0) {
+            throw "cargo が失敗しました (exit $code): $t"
+        }
+    }
 } else {
     $cargoArgs = @("build")
     if ($Configuration -eq "Release") { $cargoArgs += "--release" }
-}
 
-$cargoLine = ($cargoArgs | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join " "
-Write-Host "==> $cargo $cargoLine" -ForegroundColor Cyan
+    $cargoLine = ($cargoArgs | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join " "
+    Write-Host "==> $cargo $cargoLine" -ForegroundColor Cyan
 
-$cmd = "`"$vcvars`" >nul 2>&1 && cd /d `"$root`" && `"$cargo`" $cargoLine"
-& cmd.exe /c $cmd
-$code = $LASTEXITCODE
+    $cmd = "`"$vcvars`" >nul 2>&1 && cd /d `"$root`" && `"$cargo`" $cargoLine"
+    & cmd.exe /c $cmd
+    $code = $LASTEXITCODE
 
-if ($code -ne 0) {
-    throw "cargo が失敗しました (exit $code)"
+    if ($code -ne 0) {
+        throw "cargo が失敗しました (exit $code)"
+    }
 }

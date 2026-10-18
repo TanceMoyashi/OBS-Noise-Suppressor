@@ -513,8 +513,8 @@ pub fn build(
     let (channels, device_used) = match load_channels(num_channels, model_path, ort_dirs, device) {
         Ok(ch) => (ch, device),
         Err(e) if device == DeviceChoice::Gpu => {
-            crate::obs_log!(
-                crate::ffi::LOG_WARNING,
+            crate::dsp_log!(
+                crate::log::Level::Warning,
                 "GPU (DirectML) でモデルを読み込めないため CPU に切り替えます: {}",
                 e
             );

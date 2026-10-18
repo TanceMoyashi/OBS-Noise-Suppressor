@@ -1,0 +1,47 @@
+[package]
+name = "dpdfnet"
+version = "0.3.0"
+edition = "2021"
+publish = false
+license = "GPL-2.0-or-later"
+description = "DPDFNet speech enhancement DSP core, shared by the OBS filter and the VST3 plugin"
+
+[lib]
+name = "dpdfnet"
+path = "src/lib.rs"
+
+# ホスト（OBS / VST3 / テスト）から使う共通クレート。ホスト固有のものは一切
+# 持ち込まない:
+#   * ログの出力先は `log::set_sink` でホストが差し込む
+#   * モデル / ONNX Runtime の探索先は `paths` の既定（環境変数 + 自分の DLL の隣）
+#     にホストが `resource_dirs` を足す
+[dependencies]
+# ONNX Runtime の C API バインディング（unsafe な生 binding のみ）。
+# api-17 = ORT 1.17 相当の構造体プレフィックス。OrtApi は追記型なので ORT 1.31 でも
+# 安全に動く。disable-linking = リンクせず、実行時に自分でロードする。
+ort-sys = { version = "2.0.0-rc.14", default-features = false, features = [
+    "std",
+    "api-17",
+    "disable-linking",
+] }
+
+# n_fft = 960 = 2^6 * 3 * 5 の混合基数 FFT（kissfft 相当）。実 FFT なので realfft。
+realfft = "3.5.0"
+
+# Win32（DLL のロードと、自分の DLL / ドキュメントフォルダの場所）
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+] }
+
+[dev-dependencies]
+# オフライン検証用（OBS / DAW を起動せず DSP だけを回して WAV を比較する）
+hound = "3.5"
+
+[profile.release]
+panic = "unwind"
+opt-level = 3
+lto = "thin"
+codegen-units = 1
