@@ -11,6 +11,7 @@
 # 「LF will be replaced by CRLF」の警告を出さない)。
 *.md text eol=lf
 LICENSE text eol=lf
+COPYING text eol=lf
 .gitattributes text eol=lf
 .gitignore text eol=lf
 

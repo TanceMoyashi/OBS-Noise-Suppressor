@@ -169,7 +169,8 @@ OBS 標準のログ（`%APPDATA%\obs-studio\logs\*.txt`）にも同じ内容が�
 
 ## 不具合報告・要望
 
-どなたでも Issue を立てられます（テンプレートを用意しています）。
+**Issue は誰でも書けます**（GitHub アカウントがあれば、どなたでも）。テンプレートを
+使わずに自由に書くこともできます。
 
 - **不具合**: [不具合の報告を書く](https://github.com/TanceMoyashi/OBS-Noise-Suppressor/issues/new?template=bug_report.yml)
   （OBS のバージョン・サンプルレート・ログを書く欄があります）
@@ -185,7 +186,7 @@ OBS 標準のログ（`%APPDATA%\obs-studio\logs\*.txt`）にも同じ内容が�
 
 このリポジトリは **AI が生成したコードを含みます**（「AI による制作について」を参照）。**無保証**です。
 
-- このリポジトリの自作コード: **GPL-2.0-or-later**（[`LICENSE`](LICENSE)）
+- このリポジトリの自作コード: **GPL-2.0-or-later**（[`LICENSE`](LICENSE)。GPL の正規の全文は [`COPYING`](COPYING)）
 - ONNX Runtime（`dpdfnet_onnxruntime.dll`）: MIT License（Microsoft）
 - DPDFNet モデル（`*.onnx`）: 同梱モデルのライセンスに従います
 - 旧 VST3 版の `clear_re/plugin/third_party/kissfft`: 同フォルダの `COPYING` を参照

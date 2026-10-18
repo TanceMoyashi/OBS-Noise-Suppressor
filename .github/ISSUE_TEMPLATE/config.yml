@@ -1,4 +1,4 @@
-blank_issues_enabled: false
+blank_issues_enabled: true
 contact_links:
   - name: 使い方・対応環境（README）
     url: https://github.com/TanceMoyashi/OBS-Noise-Suppressor#readme
