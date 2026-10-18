@@ -26,7 +26,7 @@ JUCE 非依存だった VST3 版のコードをそのまま移植しています
 | 推論 | 同梱の ONNX Runtime 1.31.0（`dpdfnet_onnxruntime.dll`） |
 | UI | 自前の Win32/GDI パネル（IN / OUT VU 2 本 + 縦フェーダー 3 本 + フェーダーごとの MUTE / BYP + GR / 3 バンドメーター + メモリー 1〜8 + BYPASS） |
 | モデル | プロパティで 自動 / 高品質 (dp8) / 軽量 (dp2) を選択（切り替えは数十 ms の無音） |
-| 音声スレッド | アロケーションなし（テンソル・バッファは事前確保、`IoBinding` で再利用） |
+| 音声スレッド | アロケーションなし（テンソル・バッファは事前確保、`IoBinding` で再利用）。**GPU のときだけ**毎 hop 束ねを作り直す（DirectML が最初に上げた入力を固定してしまうため） |
 | パニック | FFI 境界ごとに `catch_unwind`。落ちずにパススルーへ退避 |
 | ログ | エラー / 警告 / 起動情報を専用ファイル `obs_noise_suppressor.log` に常時記録（OBS 標準ログにも同じ内容が出ます） |
 
@@ -184,6 +184,7 @@ dist\OBS-Noise-Suppressor\
 | Voice Reverb | 0 – 1 | 0.0 | 残す残響。**2 出力モデルのときだけ有効** |
 | Voice Reverb の扱い | 有効 / ミュート / バイパス | 有効 | 同じく効きだけ切る（ミュート = 0 % / バイパス = 100 %） |
 | モデル | 自動 / 高品質 (dp8) / 軽量 (dp2) | 自動 | 使う ONNX モデル。切り替えると数十 ms 無音になります |
+| 推論デバイス | CPU / GPU (DirectML) | CPU | 推論の実行先。**GPU は実測で CPU より遅い**（下記）。追加パックを入れたときだけ選べます |
 | VU 基準値 | −20 / −18 / −14 dBFS | −18 dBFS | パネルの VU で「0 VU」にするレベル |
 
 - **〜の扱い（ミュート / バイパス）**: パネルのフェーダーの下にある **MUTE / BYP キーと
@@ -197,6 +198,14 @@ dist\OBS-Noise-Suppressor\
   パネルの REVERB フェーダーが自動で無効（暗く）なります。
   **自動**で高品質を使っていて音が途切れる（＝処理が 10 ms の枠に間に合わない）
   状態が続くと、1 度だけ軽量へ自動で切り替わります（[CPU 負荷の目安](#cpu-負荷の目安音が途切れる--遅れて聞こえるとき)）。
+- **推論デバイス**: GPU（DirectML）は**追加パック**
+  （`OBS-Noise-Suppressor-<版>-gpu-pack.zip`。`tools\make_package.ps1 -GpuPack`
+  で作る）を入れたときだけ選べます。**実測では GPU は CPU より遅く**（このマシン /
+  ステレオ / 予算 10 ms で `dp2` 2.51 → 4.66 ms、`dp8` 6.68 → **12.73 ms**）、
+  1 ホップが小さいため DirectML の dispatch / sync の固定費が計算より大きく
+  なります。CPU 使用率そのものは下がるので、CPU を他の作業が埋めているときの
+  逃げ道です。出力は CPU とビット一致しません（実機の比較で SNR 66 dB、聴感上は
+  同じ）。追加パックが無いときは選択肢が無効になります。
 - **VU 基準値**: 業務用の VU は「0 VU」が何 dBFS かが機器ごとに違います。日本の
   放送基準は −20 dBFS、EBU は −18 dBFS、ラウドな素材向けは −14 dBFS です。
   ここを変えると **VU の目盛り全体（−20 〜 +3 VU）が対応する dBFS ごと
@@ -405,8 +414,11 @@ obs_plugin/
   uninstall.ps1                  アンインストーラー
   installer/
     install.bat / uninstall.bat  ダブルクリック用ランチャー（ASCII のみ）
+    install-gpu.bat / .ps1       追加パック（GPU / DirectML）のランチャーと中身
   vendor/
     dpdfnet_onnxruntime.dll      同梱する ONNX Runtime（MIT）
+    dpdfnet_onnxruntime_dml.dll  GPU 用（追加パックが使う。本体には入れない）
+    DirectML.dll / onnxruntime_providers_shared.dll   同じく GPU 用
   src/
     lib.rs                     obs_module_load など OBS モジュールのエクスポート
     ffi.rs                     手書きの libobs FFI（bindgen なし）
@@ -428,9 +440,10 @@ obs_plugin/
       params.rs                パラメータ定義
       offline_tests.rs         OBS を起動しない検証（遅延・一致・決定性）
   tools/
-    make_package.ps1           配布パッケージ（install.bat 同梱）を作る
+    make_package.ps1           配布パッケージ（install.bat 同梱）を作る（-GpuPack で GPU 追加パック）
     make_verify_collection.py  実機検証用のシーンコレクション生成
     run_obs_verify.ps1         実機で回して数値で確認するハーネス（-SampleRate で 48 kHz 以外も）
+    compare_dumps.py           実機ダンプ 2 つ（CPU 実行 / GPU 実行など）を突き合わせる
     gen_obs_lib.ps1            vendor\obs.lib を obs.dll から作り直す
 ```
 

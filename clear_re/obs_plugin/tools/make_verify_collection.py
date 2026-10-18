@@ -35,6 +35,11 @@ DEFAULT_SETTINGS = {
     "ambience": 0.5,
     "voice": 0.0,
     "voice_reverb": 0.0,
+    # モデル。`auto` は高品質優先（負荷が高いと自動で軽量へ切替）。
+    # 負荷を測るときは `--model dp2` のように固定した方が読みやすい。
+    "model": "auto",
+    # 推論デバイス。既定は CPU（GPU は `--device gpu` のときだけ）。
+    "inferenceDevice": "cpu",
 }
 
 
@@ -92,14 +97,17 @@ def media_source(name: str, wav: Path, uuid_str: str) -> dict:
     }
 
 
-def filter_entry(name: str = FILTER_NAME) -> dict:
+def filter_entry(name: str = FILTER_NAME, device: str = "cpu", model: str = "auto") -> dict:
+    settings = dict(DEFAULT_SETTINGS)
+    settings["inferenceDevice"] = device
+    settings["model"] = model
     return {
         "prev_ver": PREV_VER,
         "name": name,
         "uuid": str(uuid.uuid4()),
         "id": FILTER_ID,
         "versioned_id": FILTER_ID,
-        "settings": dict(DEFAULT_SETTINGS),
+        "settings": settings,
         "enabled": True,
     }
 
@@ -137,11 +145,12 @@ def scene_item(name: str, source_uuid: str, item_id: int) -> dict:
     }
 
 
-def build_collection(name: str, wav: Path, with_filter: bool) -> dict:
+def build_collection(name: str, wav: Path, with_filter: bool, device: str = "cpu",
+                     model: str = "auto") -> dict:
     media_uuid = str(uuid.uuid4())
     media = media_source("probe", wav, media_uuid)
     if with_filter:
-        media["filters"] = [filter_entry()]
+        media["filters"] = [filter_entry(device=device, model=model)]
 
     scene_uuid = str(uuid.uuid4())
     scene = {
@@ -232,6 +241,18 @@ def main() -> int:
     ap.add_argument("--no-filter", action="store_true", help="フィルタ無しの参照用コレクションを作る")
     ap.add_argument("--no-profile", action="store_true", help="プロファイルを作らない")
     ap.add_argument("--sample-rate", type=int, default=48000, help="プロファイルの SampleRate（既定 48000）")
+    ap.add_argument(
+        "--device",
+        choices=["cpu", "gpu"],
+        default="cpu",
+        help="フィルタの推論デバイス（既定 cpu）。gpu は DirectML 版 ORT が必要",
+    )
+    ap.add_argument(
+        "--model",
+        choices=["auto", "dp8", "dp2"],
+        default="auto",
+        help="フィルタのモデル（既定 auto。負荷測定では dp8 / dp2 に固定すると読みやすい）",
+    )
     args = ap.parse_args()
 
     repo = Path(__file__).resolve().parent.parent  # obs_plugin/
@@ -242,11 +263,13 @@ def main() -> int:
     scenes_dir = Path(args.scenes_dir) if args.scenes_dir else apdata("basic", "scenes")
     scenes_dir.mkdir(parents=True, exist_ok=True)
     out = scenes_dir / f"{args.name}.json"
-    data = build_collection(args.name, wav, not args.no_filter)
+    data = build_collection(args.name, wav, not args.no_filter, args.device, args.model)
     out.write_text(json.dumps(data, ensure_ascii=False, indent=4), encoding="utf-8")
     print(f"collection: {out}")
     print(f"  wav      : {wav}")
     print(f"  filter   : {'なし' if args.no_filter else FILTER_ID}")
+    print(f"  device   : {args.device}")
+    print(f"  model    : {args.model}")
 
     if not args.no_profile:
         profiles_dir = Path(args.profiles_dir) if args.profiles_dir else apdata("basic", "profiles")

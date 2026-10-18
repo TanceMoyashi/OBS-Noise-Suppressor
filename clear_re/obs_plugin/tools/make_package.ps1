@@ -38,9 +38,15 @@
 .PARAMETER NoZip
     ZIP を作らない。
 
+.PARAMETER GpuPack
+    本体ではなく **GPU (DirectML) 用の追加パック**を作る。本体は CPU のみで
+    配り、GPU を使いたい人だけがこのパックを入れる（実測で GPU は CPU より
+    遅く、同梱すると 36 MB 増えるため）。
+
 .EXAMPLE
     .\tools\make_package.ps1
     .\tools\make_package.ps1 -SkipBuild -NoZip
+    .\tools\make_package.ps1 -GpuPack
 #>
 [CmdletBinding()]
 param(
@@ -48,7 +54,8 @@ param(
     [string]$OutDir = "",
     [switch]$SkipBuild,
     [switch]$SkipModels,
-    [switch]$NoZip
+    [switch]$NoZip,
+    [switch]$GpuPack
 )
 
 $ErrorActionPreference = "Stop"
@@ -68,8 +75,128 @@ if (Test-Path -LiteralPath $cargo) {
     if ($m) { $version = $m.Matches[0].Groups[1].Value }
 }
 
-Write-Host "パッケージ先: $pkg (v$version)" -ForegroundColor Cyan
+# --------------------------------------------------------------------------
+# GPU (DirectML) 追加パック
+# --------------------------------------------------------------------------
+# 本体は CPU のみで配る。GPU は実測で CPU より遅く（1 ホップが小さいので
+# DirectML の dispatch / sync の固定費が勝つ）、同梱すると 36 MB 増えるため、
+# 使いたい人だけが入れる追加パックとして別に作る。
+if ($GpuPack) {
+    $pack = Join-Path $OutDir ("OBS-Noise-Suppressor-{0}-gpu-pack" -f $version)
+    Write-Host "GPU 追加パック: $pack (v$version)" -ForegroundColor Cyan
+    if (Test-Path -LiteralPath $pack) { Remove-Item -LiteralPath $pack -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path (Join-Path $pack "data") | Out-Null
 
+    $vendor = Join-Path $root "vendor"
+    $gpuNames = @("dpdfnet_onnxruntime_dml.dll", "DirectML.dll", "onnxruntime_providers_shared.dll")
+    foreach ($n in $gpuNames) {
+        $srcDll = Join-Path $vendor $n
+        if (-not (Test-Path -LiteralPath $srcDll)) {
+            throw "GPU 用の DLL がありません: $srcDll"
+        }
+        Copy-Item -LiteralPath $srcDll -Destination (Join-Path $pack "data\$n") -Force
+    }
+    foreach ($f in @("installer\install-gpu.ps1", "installer\install-gpu.bat")) {
+        Copy-Item -LiteralPath (Join-Path $root $f) -Destination $pack -Force
+    }
+    $licenseSrc = Join-Path (Split-Path -Parent $repo) "LICENSE"
+    if (Test-Path -LiteralPath $licenseSrc) {
+        Copy-Item -LiteralPath $licenseSrc -Destination (Join-Path $pack "LICENSE") -Force
+    } else {
+        Write-Warning "LICENSE が見つかりません: $licenseSrc"
+    }
+
+    $readme = @"
+OBS Noise Suppressor v$version - GPU (DirectML) 追加パック
+========================================================
+
+本体 (OBS-Noise-Suppressor-$version-win64.zip) を先にインストールしてある
+場合だけ使えます。入るのは次の 3 つです。
+
+    data\dpdfnet_onnxruntime_dml.dll   DirectML 入りの ONNX Runtime
+    data\DirectML.dll                  DirectML 本体
+    data\onnxruntime_providers_shared.dll
+
+DPDFNet の推論を CPU ではなく GPU (DirectML) で回すための追加パックです。
+
+
+インストール
+------------
+1. OBS を終了します (起動中だと DLL を上書きできません)。
+2. install-gpu.bat をダブルクリックします。
+   既定では本体と同じ場所へ入れます。管理者権限は不要です。
+
+       %ProgramData%\obs-studio\plugins\obs_noise_suppressor\data\
+
+   ポータブル版へ入れた場合は指定してください。
+
+       install-gpu.bat -Obs "D:\obs-studio"
+
+3. OBS を起動し、フィルタのプロパティの「推論デバイス」で
+   「GPU - DirectML」を選びます (既定は CPU のままです)。
+
+
+なぜ既定で入っていないのか
+--------------------------
+実測では **GPU は CPU より遅い**ためです (このマシン / ステレオ / 1 ホップ
+10 ms の予算)。
+
+    dp2 (軽量)   CPU 2.51 ms (25 %)  GPU 4.66 ms (47 %)
+    dp8 (高品質) CPU 6.68 ms (67 %)  GPU 12.73 ms (127 %)
+
+1 ホップが小さいため、DirectML の dispatch / sync の固定費が計算より大きく
+なります。高品質モデルでは予算を超えるので、負荷が高いと自動的に軽量モデル
+(dp2) へ切り替わります (そのときは理由がログに出ます)。CPU 使用率そのものは
+下がるので、CPU が他の作業で埋まっているときの逃げ道として用意してあります。
+
+
+GPU の性質
+----------
+* 出力は CPU とビット一致しません (丸めが違うため)。実機の比較では
+  SNR 66 dB 程度で、聴感上の差はありません。
+* 対応していない GPU ではセッション作成に失敗し、警告を出して CPU で
+  動きます (無音にはなりません)。
+* GPU をやめるときは、data\ の 3 つを手で削除してください (それだけで
+  CPU に戻ります。プラグイン本体は uninstall.bat で消えます)。
+
+
+ライセンス
+----------
+* ONNX Runtime (dpdfnet_onnxruntime_dml.dll): MIT License (Microsoft)
+* DirectML (DirectML.dll): Microsoft のライセンスに従います
+* この追加パックの構成物: GPL-2.0-or-later (同梱の LICENSE を参照)
+
+詳しくはリポジトリの clear_re\obs_plugin\README.md と OBS_VERIFY.md を
+参照してください。
+"@
+    $readme = $readme -replace "`r?`n", "`r`n"
+    [System.IO.File]::WriteAllText((Join-Path $pack "README.txt"), $readme,
+        (New-Object System.Text.UTF8Encoding($true)))
+
+    Write-Host ""
+    Get-ChildItem -LiteralPath $pack -Recurse -File | Sort-Object FullName |
+        ForEach-Object {
+            $rel = $_.FullName.Substring($pack.Length + 1)
+            Write-Host ("  {0,-40} {1,12:N0}" -f $rel, $_.Length)
+        }
+    $totalMB = [math]::Round(((Get-ChildItem -LiteralPath $pack -Recurse -File |
+        Measure-Object -Property Length -Sum).Sum / 1MB), 2)
+    Write-Host ""
+    Write-Host "合計 $totalMB MB" -ForegroundColor Green
+
+    if (-not $NoZip) {
+        $zip = Join-Path $OutDir ("OBS-Noise-Suppressor-{0}-gpu-pack.zip" -f $version)
+        if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [System.IO.Compression.ZipFile]::CreateFromDirectory(
+            $pack, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $true)
+        $zipMB = [math]::Round(((Get-Item -LiteralPath $zip).Length / 1MB), 2)
+        Write-Host "ZIP: $zip ($zipMB MB)" -ForegroundColor Green
+    }
+    return
+}
+
+Write-Host "パッケージ先: $pkg (v$version)" -ForegroundColor Cyan
 if (Test-Path -LiteralPath $pkg) {
     Remove-Item -LiteralPath $pkg -Recurse -Force
 }
@@ -206,6 +333,11 @@ uninstall.bat をダブルクリックして y を押します。
     音声処理の負荷: 1 ホップ平均 7.25 ms / 予算 10.00 ms (73 %)
   のような行で確認できます (1 回だけ出ます)。間に合わない状態が続いた場合は
   警告を残し、1 度だけ自動で軽量モデルへ切り替えます (設定は書き換えません)。
+* GPU (DirectML) を使いたい場合は、別配布の追加パック
+  (OBS-Noise-Suppressor-<版>-gpu-pack.zip) を入れると、プロパティの
+  「推論デバイス」で GPU を選べます。ただし**実測では GPU の方が遅い**ので
+  (このマシン / ステレオで dp8 6.7 -> 12.7 ms)、CPU に余裕があるなら
+  CPU のままをおすすめします。
 * プラグインのファイルは次の 4 つだけです。手で消しても構いません。
     bin\64bit\obs_noise_suppressor.dll   (本体)
     data\dpdfnet_onnxruntime.dll         (ONNX Runtime)

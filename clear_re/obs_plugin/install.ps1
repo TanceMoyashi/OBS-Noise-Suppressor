@@ -58,6 +58,12 @@
 .PARAMETER SkipModels
     モデルをコピーしない。
 
+.PARAMETER WithGpu
+    GPU (DirectML) 用の ONNX Runtime も配置する。**既定では入れない**（実測で
+    GPU は CPU より遅く、36 MB 増えるため、追加パックとして別に配っている。
+    `data\dpdfnet_onnxruntime_dml.dll` / `DirectML.dll` /
+    `onnxruntime_providers_shared.dll` を vendor に置いてから使う）。
+
 .PARAMETER NoDetect
     OBS の検出と、ポータブル版への追加配置をしない。
 
@@ -82,6 +88,7 @@ param(
     [string[]]$Obs = @(),
     [switch]$SkipBuild,
     [switch]$SkipModels,
+    [switch]$WithGpu,
     [switch]$NoDetect,
     [switch]$NoElevate,
     [switch]$Force
@@ -271,8 +278,22 @@ function Resolve-OrtDll {
     return $null
 }
 
-function Remove-OldInstall([string]$Path, [string]$Why) {
-    if (-not $Path) { return }
+# GPU (DirectML) 用の追加 DLL を探す。`$OrtDllPath` の隣 → vendor の順。
+# 無くても CPU で動くので、見つからなければ $null を返すだけにする。
+function Resolve-SideDll([string]$Name, [string]$NearDll) {
+    $dirs = New-Object System.Collections.Generic.List[string]
+    if ($NearDll) { $dirs.Add((Split-Path -Parent $NearDll)) }
+    $dirs.Add((Join-Path $root "vendor"))
+
+    foreach ($d in $dirs) {
+        if (-not (Test-Path -LiteralPath $d -PathType Container)) { continue }
+        $f = Join-Path $d $Name
+        if (Test-Path -LiteralPath $f -PathType Leaf) { return (Resolve-Path -LiteralPath $f).Path }
+    }
+    return $null
+}
+
+function Remove-OldInstall([string]$Path, [string]$Why) {    if (-not $Path) { return }
     if (-not (Test-Path -LiteralPath $Path)) { return }
     try {
         Remove-Item -LiteralPath $Path -Recurse -Force
@@ -382,6 +403,35 @@ if ($Packaged) {
     }
     Copy-Item -LiteralPath $ort -Destination (Join-Path $PayloadData "dpdfnet_onnxruntime.dll") -Force
     Write-Ok "ONNX Runtime: $ort"
+
+    # GPU (DirectML) 版の ONNX Runtime。**既定では同梱しない**。
+    #
+    # 実測で GPU は CPU より遅く（1 ホップが小さいので dispatch / sync の固定費が
+    # 勝つ）、同梱すると 36 MB 増える。使いたい人だけが入れる追加パック
+    # (`tools/make_package.ps1 -GpuPack`) として別に配る。-WithGpu で入れる。
+    if (-not $WithGpu) {
+        Write-Skip "GPU (DirectML): 同梱しない (-WithGpu で追加。プロパティで GPU は選べない)"
+    } else {
+        # 3 つ揃って初めて「推論デバイス: GPU」が選べる（DirectML.dll は Windows に
+        # 古い版があることがあるので同梱する）。
+        $gpuNames = @("dpdfnet_onnxruntime_dml.dll", "onnxruntime_providers_shared.dll", "DirectML.dll")
+        $gpuFound = 0
+        foreach ($n in $gpuNames) {
+            $src = Resolve-SideDll -Name $n -NearDll $ort
+            if (-not $src) { continue }
+            Copy-Item -LiteralPath $src -Destination (Join-Path $PayloadData $n) -Force
+            $gpuFound++
+        }
+        if ($gpuFound -eq $gpuNames.Count) {
+            Write-Ok "GPU (DirectML): 同梱あり"
+        } elseif ($gpuFound -gt 0) {
+            # 中途半端に同梱すると「GPU が選べるのに初期化に失敗する」ので警告する。
+            Write-Warn2 "GPU (DirectML) の同梱が不完全です ($gpuFound/$($gpuNames.Count))。"
+            Write-Warn2 "  $($gpuNames -join ', ') を $ort の隣 (vendor) に置いてください。"
+        } else {
+            Write-Warn2 "GPU (DirectML) の DLL が見つかりません (-WithGpu を外すと CPU のみになります)"
+        }
+    }
 
     if (-not $SkipModels) {
         if (-not $ModelSource) { $ModelSource = Join-Path $repo "plugin\models" }

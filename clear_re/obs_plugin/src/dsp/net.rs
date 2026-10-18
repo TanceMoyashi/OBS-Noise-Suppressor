@@ -21,6 +21,7 @@ use ort_sys::{
 
 use super::meta::ModelMeta;
 use super::ort;
+use crate::paths::DeviceChoice;
 
 const SPEC_RANK: usize = 4;
 const SPEC_COUNT_RANK: usize = 4;
@@ -29,6 +30,19 @@ pub struct DpdfNet {
     api: &'static OrtApi,
     session: *mut OrtSession,
     mem: *mut OrtMemoryInfo,
+    /// 出力用のメモリ情報（`OrtMemTypeCPUOutput`）。GPU のときだけ作る。
+    ///
+    /// これが無いと、DML は出力を**デバイス側に確保して書き込み**、こちらが
+    /// 用意した CPU バッファは空のままになる（症状: 出力が無音同然）。
+    /// CPU EP では不要なので `null`（= `mem` を使う）。
+    mem_out: *mut OrtMemoryInfo,
+    /// このセッションの推論デバイス（出力のメモリ種別を決めるのに使う）。
+    device: DeviceChoice,
+    /// GPU のときだけ入る入出力名（毎 hop 束ね直すために要る）。
+    ///
+    /// CPU は束ねを使い回せる（実機でビット一致を確認した経路をそのまま
+    /// 使いたい）ので `None`。
+    names: Option<IoNames>,
 
     binding_a: *mut OrtIoBinding,
     binding_b: *mut OrtIoBinding,
@@ -57,14 +71,22 @@ pub struct DpdfNet {
 }
 
 impl DpdfNet {
-    pub fn load(model_path: &Path, n_threads: i32, ort_dirs: &[PathBuf]) -> Result<Self, String> {
-        let api = ort::ensure_loaded(ort_dirs)?;
-        let env_addr = ort::global_env(api)?;
+    pub fn load(
+        model_path: &Path,
+        n_threads: i32,
+        device: DeviceChoice,
+        ort_dirs: &[PathBuf],
+    ) -> Result<Self, String> {
+        let rt = ort::ensure_loaded(device, ort_dirs)?;
+        let api = rt.api();
+        let env_addr = rt.env_addr();
 
         let mut me = Self {
             api,
             session: ptr::null_mut(),
             mem: ptr::null_mut(),
+            mem_out: ptr::null_mut(),
+            device,
             binding_a: ptr::null_mut(),
             binding_b: ptr::null_mut(),
             spec_value: ptr::null_mut(),
@@ -80,6 +102,7 @@ impl DpdfNet {
             state_in_a: true,
             has_ns_output: false,
             loaded: false,
+            names: None,
             last_error: String::new(),
             meta: ModelMeta::default(),
             freq_bins: 0,
@@ -87,7 +110,7 @@ impl DpdfNet {
         };
 
         // ここから先で失敗しても Drop が後始末する。
-        me.create_session(env_addr as *const OrtEnv, model_path, n_threads)?;
+        me.create_session(env_addr as *const OrtEnv, model_path, n_threads, device)?;
         me.setup_bindings()?;
         me.run_warmup();
         Ok(me)
@@ -117,7 +140,13 @@ impl DpdfNet {
     // ロード
     // ----------------------------------------------------------------------
 
-    fn create_session(&mut self, env: *const OrtEnv, model_path: &Path, n_threads: i32) -> Result<(), String> {
+    fn create_session(
+        &mut self,
+        env: *const OrtEnv,
+        model_path: &Path,
+        n_threads: i32,
+        device: DeviceChoice,
+    ) -> Result<(), String> {
         let api = self.api;
 
         let mut options: *mut OrtSessionOptions = ptr::null_mut();
@@ -135,6 +164,46 @@ impl DpdfNet {
             (api.SetSessionGraphOptimizationLevel)(options, GraphOptimizationLevel::ORT_ENABLE_ALL)
         });
         opt!(unsafe { (api.SetSessionExecutionMode)(options, ExecutionMode::ORT_SEQUENTIAL) });
+
+        if device == DeviceChoice::Gpu {
+            // DirectML は **mem pattern 最適化と並列実行に対応しない**（公式
+            // ドキュメント）。特に mem pattern を有効にしたままだと、内部の
+            // 作業バッファが正しく確保されず**出力が壊れる**（エラーにならない
+            // ので気付きにくい）。並列実行は上で `ORT_SEQUENTIAL` にしてある。
+            opt!(unsafe { (api.DisableMemPattern)(options) });
+
+            // DML EP を先頭に挿す（対応しないノードだけ CPU に落ちる）。
+            //
+            // DML の関数は `OrtApi` ではなく EP 専用の `OrtDmlApi` にあり、
+            // `GetExecutionProviderApi("DML", ...)` で取る。DML 非対応ビルドでは
+            // ここで失敗するので、CPU 版の DLL を掴んでいても安全に検出できる。
+            //
+            // ここで失敗したら options を解放して呼び出し側に返す
+            // （呼び出し側が CPU で組み直す）。
+            let mut dml: *const c_void = ptr::null();
+            if let Err(e) = ort::check(api, unsafe {
+                (api.GetExecutionProviderApi)(
+                    c"DML".as_ptr(),
+                    ort_sys::ORT_API_VERSION,
+                    &mut dml,
+                )
+            }) {
+                unsafe { (api.ReleaseSessionOptions)(options) };
+                return Err(format!("この onnxruntime は DirectML EP を持たない: {e}"));
+            }
+            if dml.is_null() {
+                unsafe { (api.ReleaseSessionOptions)(options) };
+                return Err("この onnxruntime は DirectML EP を持たない (API が空)".to_string());
+            }
+
+            // SAFETY: dml は ORT が返した OrtDmlApi で、ロードした DLL 内で有効。
+            let dml_api = dml as *const ort_sys::OrtDmlApi;
+            let st = unsafe { ((*dml_api).SessionOptionsAppendExecutionProvider_DML)(options, 0) };
+            if let Err(e) = ort::check(api, st) {
+                unsafe { (api.ReleaseSessionOptions)(options) };
+                return Err(format!("DirectML EP を追加できません: {e}"));
+            }
+        }
 
         let wide = to_wide_path(model_path);
         let mut session: *mut OrtSession = ptr::null_mut();
@@ -265,6 +334,40 @@ impl DpdfNet {
         )?;
         self.mem = mem;
 
+        if self.device == DeviceChoice::Gpu {
+            // 出力は CPU 側のバッファへ戻す。`OrtMemTypeCPUOutput` を付けないと
+            // ORT は「出力はデバイス側のメモリ」と解釈し、こちらのバッファを
+            // 書かない（症状: 出力が無音）。
+            let mut m: *mut OrtMemoryInfo = ptr::null_mut();
+            ort::check(
+                api,
+                unsafe {
+                    (api.CreateCpuMemoryInfo)(
+                        OrtAllocatorType::OrtArenaAllocator,
+                        OrtMemType::OrtMemTypeCPUOutput,
+                        &mut m,
+                    )
+                },
+            )?;
+            self.mem_out = m;
+
+            // 束ね（OrtValue / IoBinding）は `run_gpu_inner` が毎 hop 作り直す。
+            // 使い回すと DirectML が**最初に上げた入力をそのまま使い続け**、
+            // 以降の hop が古いデータで計算されてしまう（実測で確認。CPU EP では
+            // 起きないので、既定の CPU 経路は今までどおり使い回す）。
+            self.names = Some(IoNames {
+                spec: spec_name,
+                state_in: state_in_name,
+                full: full_name,
+                state_out: state_out_name,
+                ns: ns_name,
+            });
+            self.loaded = true;
+            self.state_in_a = true;
+            return Ok(());
+        }
+
+        // ---- CPU: 使い回しの束ね ----
         self.spec_value = unsafe {
             create_tensor(
                 api,
@@ -284,13 +387,7 @@ impl DpdfNet {
             )?
         };
         self.out_ns_value = unsafe {
-            create_tensor(
-                api,
-                mem,
-                &mut self.out_ns_buf,
-                spec_count,
-                &spec_shape_i64,
-            )?
+            create_tensor(api, mem, &mut self.out_ns_buf, spec_count, &spec_shape_i64)?
         };
         self.state_value_a = unsafe {
             create_tensor(
@@ -491,6 +588,19 @@ impl DpdfNet {
             return false;
         }
 
+        if self.device == DeviceChoice::Gpu {
+            return match self.run_gpu_inner() {
+                Ok(()) => true,
+                Err(e) => {
+                    if self.last_error != e {
+                        self.last_error = e;
+                    }
+                    false
+                }
+            };
+        }
+
+        // ---- CPU EP（束ねを使い回す。実機でビット一致を確認した経路）----
         let binding = if self.state_in_a {
             self.binding_a
         } else {
@@ -532,6 +642,134 @@ impl DpdfNet {
         self.state_in_a = !self.state_in_a;
         true
     }
+
+    /// GPU (DirectML) の 1 hop。**束ねを毎 hop 作り直す。**
+    ///
+    /// `OrtValue` と `OrtIoBinding` を使い回すと、DirectML は**最初に上げた
+    /// 入力をそのまま使い続ける**（ホスト側のバッファを書き換えても再転送
+    /// されない）。症状は「モデルの出力が無音になり、確認できるのは乾いた音
+    /// の漏れだけ」。毎 hop 作り直すと CPU EP と 96 dB で一致する（計測済み）。
+    ///
+    /// CPU EP では起きない現象なので、既定の CPU 経路は使い回しのままにして
+    /// ある（1 hop ごとの確保を持ち込まないため）。
+    fn run_gpu_inner(&mut self) -> Result<(), String> {
+        let api = self.api;
+        let Some(names) = self.names.as_ref() else {
+            return Err("GPU の入出力名が無い（初期化の順序がおかしい）".to_string());
+        };
+
+        let spec_count = 2 * self.freq_bins;
+        let spec_shape: [i64; SPEC_COUNT_RANK] = [1, 1, self.freq_bins as i64, 2];
+        let state_shape: [i64; 1] = [self.state_size as i64];
+
+        // 状態は ping-pong（今回の出力が次の入力になる）。
+        let (state_in_buf, state_out_buf) = if self.state_in_a {
+            (&mut self.state_buf_a, &mut self.state_buf_b)
+        } else {
+            (&mut self.state_buf_b, &mut self.state_buf_a)
+        };
+
+        let mut binding: *mut OrtIoBinding = ptr::null_mut();
+        ort::check(api, unsafe { (api.CreateIoBinding)(self.session, &mut binding) })?;
+
+        // 途中で失敗しても作った分は必ず解放する。
+        let mut guard = ValueGuard {
+            api,
+            binding,
+            values: Vec::with_capacity(5),
+        };
+
+        let spec_value = unsafe {
+            create_tensor(api, self.mem, &mut self.spec_buf, spec_count, &spec_shape)?
+        };
+        guard.values.push(spec_value);
+        let state_in_value = unsafe {
+            create_tensor(api, self.mem, state_in_buf, self.state_size, &state_shape)?
+        };
+        guard.values.push(state_in_value);
+        let full_value = unsafe {
+            create_tensor(api, self.mem_out, &mut self.out_full_buf, spec_count, &spec_shape)?
+        };
+        guard.values.push(full_value);
+        let state_out_value = unsafe {
+            create_tensor(api, self.mem_out, state_out_buf, self.state_size, &state_shape)?
+        };
+        guard.values.push(state_out_value);
+
+        unsafe {
+            ort::check(api, (api.BindInput)(binding, names.spec.as_ptr(), spec_value))?;
+            ort::check(
+                api,
+                (api.BindInput)(binding, names.state_in.as_ptr(), state_in_value),
+            )?;
+            ort::check(
+                api,
+                (api.BindOutput)(binding, names.full.as_ptr(), full_value),
+            )?;
+            ort::check(
+                api,
+                (api.BindOutput)(binding, names.state_out.as_ptr(), state_out_value),
+            )?;
+        }
+
+        if let Some(ns) = names.ns.as_ref() {
+            let ns_value = unsafe {
+                create_tensor(api, self.mem_out, &mut self.out_ns_buf, spec_count, &spec_shape)?
+            };
+            guard.values.push(ns_value);
+            ort::check(api, unsafe {
+                (api.BindOutput)(binding, ns.as_ptr(), ns_value)
+            })?;
+        }
+
+        ort::check(api, unsafe {
+            (api.RunWithBinding)(self.session, ptr::null::<OrtRunOptions>(), binding)
+        })?;
+        // 出力を CPU のバッファへ移送する（DML の出力はデバイス側にある）。
+        ort::check(api, unsafe { (api.SynchronizeBoundOutputs)(binding) })?;
+
+        if !self.has_ns_output {
+            // 1 出力モデルでは 2 出力目を full と同じにする（Voice Reverb を無効化）。
+            self.out_ns_buf[..spec_count].copy_from_slice(&self.out_full_buf[..spec_count]);
+        }
+
+        // 新しい状態は出力側のバッファに入っている。
+        self.state_in_a = !self.state_in_a;
+        Ok(())
+    }
+}
+
+/// GPU のときだけ要る入出力名。
+struct IoNames {
+    spec: CString,
+    state_in: CString,
+    full: CString,
+    state_out: CString,
+    ns: Option<CString>,
+}
+
+/// 毎 hop 作る `OrtValue` と `OrtIoBinding` を確実に解放する。
+///
+/// `?` で抜ける経路があるので、解放漏れを防ぐために guard で持つ。
+struct ValueGuard {
+    api: &'static OrtApi,
+    binding: *mut OrtIoBinding,
+    values: Vec<*mut OrtValue>,
+}
+
+impl Drop for ValueGuard {
+    fn drop(&mut self) {
+        unsafe {
+            for v in self.values.drain(..) {
+                if !v.is_null() {
+                    (self.api.ReleaseValue)(v);
+                }
+            }
+            if !self.binding.is_null() {
+                (self.api.ReleaseIoBinding)(self.binding);
+            }
+        }
+    }
 }
 
 impl Drop for DpdfNet {
@@ -557,6 +795,9 @@ impl Drop for DpdfNet {
             }
             if !self.mem.is_null() {
                 (api.ReleaseMemoryInfo)(self.mem);
+            }
+            if !self.mem_out.is_null() {
+                (api.ReleaseMemoryInfo)(self.mem_out);
             }
             if !self.session.is_null() {
                 (api.ReleaseSession)(self.session);

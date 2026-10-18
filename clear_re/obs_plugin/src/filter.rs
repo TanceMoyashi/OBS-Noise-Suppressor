@@ -87,6 +87,8 @@ pub struct Params {
     voice_reverb_mode: AtomicU8,
     /// 使うモデル（`paths::ModelChoice::code()`）。エンジンを組み直すかの判定にも使う。
     model: AtomicU8,
+    /// 推論デバイス（`paths::DeviceChoice::code()`）。同じく組み直しの判定に使う。
+    device: AtomicU8,
     /// VU メーターの基準（`dsp::VuRef::code()` = dBFS）。表示にだけ効く。
     vu_ref: AtomicU8,
 }
@@ -101,6 +103,7 @@ impl Params {
             voice_mode: AtomicU8::new(dsp::FeatureMode::default().code()),
             voice_reverb_mode: AtomicU8::new(dsp::FeatureMode::default().code()),
             model: AtomicU8::new(paths::ModelChoice::default().code()),
+            device: AtomicU8::new(paths::DeviceChoice::default().code()),
             vu_ref: AtomicU8::new(dsp::VuRef::default().code()),
         }
     }
@@ -166,6 +169,15 @@ impl Params {
         self.model.store(m.code(), Ordering::Relaxed);
     }
 
+    /// 推論デバイス（CPU / GPU）。
+    pub fn device(&self) -> paths::DeviceChoice {
+        paths::DeviceChoice::from_code(self.device.load(Ordering::Relaxed))
+    }
+
+    pub fn set_device(&self, d: paths::DeviceChoice) {
+        self.device.store(d.code(), Ordering::Relaxed);
+    }
+
     /// VU メーターの基準（0 VU = 何 dBFS）。
     pub fn vu_ref(&self) -> dsp::VuRef {
         dsp::VuRef::from_code(self.vu_ref.load(Ordering::Relaxed))
@@ -195,6 +207,12 @@ impl Params {
             if !m.is_null() {
                 let s = CStr::from_ptr(m).to_string_lossy();
                 self.set_model(paths::ModelChoice::from_setting(&s));
+            }
+
+            let dv = crate::ffi::obs_data_get_string(settings, dsp::DEVICE.as_ptr());
+            if !dv.is_null() {
+                let s = CStr::from_ptr(dv).to_string_lossy();
+                self.set_device(paths::DeviceChoice::from_setting(&s));
             }
 
             let vr = crate::ffi::obs_data_get_string(settings, dsp::VU_REF.as_ptr());
@@ -326,6 +344,8 @@ pub struct FilterData {
     /// 今のエンジンが使っているモデル（`paths::ModelChoice::code()`）。
     /// 設定変更で組み直すべきかの判定に使う。
     engine_model: AtomicU8,
+    /// 今のエンジンが使っている推論デバイス（`paths::DeviceChoice::code()`）。
+    engine_device: AtomicU8,
     /// 今のエンジンが想定しているサンプルレート。OBS の設定変更で変わる。
     engine_rate: AtomicU32,
 
@@ -374,6 +394,7 @@ impl FilterData {
             engine: AtomicPtr::new(ptr::null_mut()),
             engine_channels: AtomicUsize::new(0),
             engine_model: AtomicU8::new(u8::MAX),
+            engine_device: AtomicU8::new(u8::MAX),
             engine_rate: AtomicU32::new(0),
             forced_model: AtomicU8::new(FORCED_NONE),
             rebuild_lock: Mutex::new(()),
@@ -437,17 +458,21 @@ impl FilterData {
             paths::ModelChoice::from_code(forced)
         };
 
+        let want_device = self.shared.params.device();
+
         let cur = self.engine.load(Ordering::Acquire);
         if !cur.is_null()
             && self.engine_channels.load(Ordering::Relaxed) == want
             && self.engine_model.load(Ordering::Relaxed) == want_model.code()
+            && self.engine_device.load(Ordering::Relaxed) == want_device.code()
             && self.engine_rate.load(Ordering::Relaxed) == sr
         {
             return true;
         }
 
         // ONNX Runtime を先に確定させる（失敗理由を出せるように）。
-        if let Err(e) = ort::ensure_loaded(&self.resource_dirs) {
+        // CPU と GPU は別の DLL なので、デバイスごとに読み込み結果を持つ。
+        if let Err(e) = ort::ensure_loaded(want_device, &self.resource_dirs) {
             self.set_status_detail(ST_ORT_UNAVAILABLE, e);
             return false;
         }
@@ -474,6 +499,7 @@ impl FilterData {
             sr,
             &model,
             &self.resource_dirs,
+            want_device,
             Arc::clone(&self.shared.meters),
         ) {
             Ok(eng) => {
@@ -481,11 +507,13 @@ impl FilterData {
                 let eng_latency = eng.latency_samples;
                 let added_ms = eng.added_latency_ms;
                 let dereverb = eng.dereverb_available;
+                let device_used = eng.device;
                 let ptr = Box::into_raw(Box::new(eng));
 
                 let old = self.engine.swap(ptr, Ordering::AcqRel);
                 self.engine_channels.store(want, Ordering::Relaxed);
                 self.engine_model.store(want_model.code(), Ordering::Relaxed);
+                self.engine_device.store(device_used.code(), Ordering::Relaxed);
                 self.engine_rate.store(sr, Ordering::Relaxed);
                 self.shared.dereverb.store(dereverb, Ordering::Relaxed);
                 self.shared.channels.store(want, Ordering::Relaxed);
@@ -513,10 +541,11 @@ impl FilterData {
                 self.set_status_detail(
                     ST_OK,
                     format!(
-                        "{} / ch={want} / latency {} samples ({:.0} ms) / {summary}",
+                        "{} / ch={want} / latency {} samples ({:.0} ms) / dev {} / {summary}",
                         rate_label(sr),
                         eng_latency,
-                        eng_latency as f64 / OBS_SR as f64 * 1000.0
+                        eng_latency as f64 / OBS_SR as f64 * 1000.0,
+                        device_used.label()
                     ),
                 );
                 // パネルに出す 1 行は短く保つ（冗長な詳細は status_detail 側にあり、
@@ -535,8 +564,15 @@ impl FilterData {
                 } else {
                     format!("{} (負荷により自動切替)", want_model.as_str())
                 };
+                // GPU を指定したのに組み立てられなかったときは、そう書く
+                // （黙って CPU で動くと「GPU が効いていない」ことに気付けない）。
+                let device_label = if device_used == want_device {
+                    want_device.label().to_string()
+                } else {
+                    format!("{} (GPU 失敗→CPU)", device_used.label())
+                };
                 self.shared.set_summary(format!(
-                    "{want} ch  ·  {}  ·  遅延 {eng_latency} samples ({lat_ms:.0} ms{src})  ·  dereverb {}  ·  model {model_label}",
+                    "{want} ch  ·  {}  ·  遅延 {eng_latency} samples ({lat_ms:.0} ms{src})  ·  dereverb {}  ·  model {model_label}  ·  dev {device_label}",
                     rate_label(sr),
                     if dereverb { "あり" } else { "なし" },
                 ));
@@ -557,6 +593,7 @@ impl FilterData {
         let old = self.engine.swap(ptr::null_mut(), Ordering::AcqRel);
         self.engine_channels.store(0, Ordering::Relaxed);
         self.engine_model.store(u8::MAX, Ordering::Relaxed);
+        self.engine_device.store(u8::MAX, Ordering::Relaxed);
         self.engine_rate.store(0, Ordering::Relaxed);
         self.shared.channels.store(0, Ordering::Relaxed);
         self.shared.rate.store(0, Ordering::Relaxed);
@@ -722,6 +759,11 @@ pub unsafe extern "C" fn get_defaults(settings: *mut crate::ffi::obs_data_t) {
             settings,
             dsp::MODEL.as_ptr(),
             dsp::MODEL_DEFAULT.as_ptr(),
+        );
+        crate::ffi::obs_data_set_default_string(
+            settings,
+            dsp::DEVICE.as_ptr(),
+            dsp::DEVICE_DEFAULT.as_ptr(),
         );
         crate::ffi::obs_data_set_default_string(
             settings,
@@ -933,6 +975,40 @@ pub unsafe extern "C" fn get_properties(
         crate::ffi::obs_property_set_long_description(
             model_list,
             c"使う DPDFNet モデル。切り替えるとエンジンを作り直すため数十 ms 音が途切れます。".as_ptr(),
+        );
+
+        // ---- 推論デバイス（ドロップダウン） ----
+        // GPU は DirectML 経由で動くが、実測では CPU より遅い（per-hop の
+        // dispatch / sync が支配的なため）。CPU 側の余裕がまったく無い環境用の
+        // 選択肢として残してある。同梱の DML 版 ORT が無ければ選べない。
+        let device_list = crate::ffi::obs_properties_add_list(
+            props,
+            dsp::DEVICE.as_ptr(),
+            c"推論デバイス".as_ptr(),
+            crate::ffi::OBS_COMBO_TYPE_LIST,
+            crate::ffi::OBS_COMBO_FORMAT_STRING,
+        );
+        for (idx, d) in [paths::DeviceChoice::Cpu, paths::DeviceChoice::Gpu]
+            .iter()
+            .enumerate()
+        {
+            let v = std::ffi::CString::new(d.as_str()).unwrap_or_default();
+            let label = match d {
+                paths::DeviceChoice::Cpu => "CPU".to_string(),
+                paths::DeviceChoice::Gpu => "GPU - DirectML".to_string(),
+            };
+            let l = std::ffi::CString::new(label).unwrap_or_default();
+            crate::ffi::obs_property_list_add_string(device_list, l.as_ptr(), v.as_ptr());
+            if paths::ort_dll_candidates(*d, &dirs).is_empty() {
+                crate::ffi::obs_property_list_item_disable(device_list, idx, true);
+            }
+        }
+        crate::ffi::obs_property_set_long_description(
+            device_list,
+            c"推論の実行先。GPU は DirectML 経由で、別配布の追加パック (gpu-pack) を\
+入れたときだけ選べます。実測では GPU のほうが 1 フレームあたり 1.6〜2.3 倍遅いので、\
+通常は CPU のままにしてください。"
+                .as_ptr(),
         );
 
         // ---- VU メーターの基準 ----

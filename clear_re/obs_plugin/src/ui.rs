@@ -1697,6 +1697,12 @@ impl Panel {
             );
             let model = std::ffi::CString::new(self.shared.params.model().as_str()).unwrap_or_default();
             crate::ffi::obs_data_set_string(d, dsp::MODEL.as_ptr(), model.as_ptr());
+            // パネルにデバイスの UI は無いが、ここで書き戻さないと
+            // `read_settings` が空文字を読んで CPU に戻ってしまう
+            // （つまみを動かしただけで GPU 設定が消える）。
+            let device =
+                std::ffi::CString::new(self.shared.params.device().as_str()).unwrap_or_default();
+            crate::ffi::obs_data_set_string(d, dsp::DEVICE.as_ptr(), device.as_ptr());
             let vref = std::ffi::CString::new(self.shared.params.vu_ref().as_str()).unwrap_or_default();
             crate::ffi::obs_data_set_string(d, dsp::VU_REF.as_ptr(), vref.as_ptr());
             // ミュート / バイパス（つまみの値はこの上で書き終えている）。

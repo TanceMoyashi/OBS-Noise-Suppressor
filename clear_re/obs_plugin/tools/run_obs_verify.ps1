@@ -33,6 +33,20 @@
     検証用プロファイルの OBS サンプルレート（既定 48000）。48 kHz 以外を試すと
     レート変換経路の実機確認になる（例: -SampleRate 96000）。
 
+.PARAMETER InferenceDevice
+    フィルタの「推論デバイス」（既定 cpu）。`gpu` は DirectML 版 ONNX Runtime
+    （`data\dpdfnet_onnxruntime_dml.dll` と `data\DirectML.dll`）が必要。
+    GPU では実機の出力が CPU とビット一致しない（同じ音だが丸めが違う）ので、
+    `-SkipTest` を付けて live_dump テストは回さないこと。
+
+.PARAMETER Model
+    フィルタの「モデル」（既定 auto）。負荷を測るときは `dp8` / `dp2` に固定すると
+    自動フォールバックが挟まらず読みやすい（`auto` は高負荷時に dp2 へ切り替わる）。
+
+.PARAMETER WithGpu
+    インストール時に GPU (DirectML) 用の DLL も入れる（`install.ps1 -WithGpu`）。
+    既定では入れない（本体は CPU のみで配り、GPU は追加パック扱いのため）。
+
 .PARAMETER Wav
     再生する WAV（既定は `plugin\test_signals\speech_tail_reverb_48k.wav`）。
 
@@ -59,11 +73,16 @@ param(
     [string]$Name = "dpdfnet-verify",
     [int]$Seconds = 25,
     [int]$SampleRate = 48000,
+    [ValidateSet("cpu", "gpu")]
+    [string]$InferenceDevice = "cpu",
+    [ValidateSet("auto", "dp8", "dp2")]
+    [string]$Model = "auto",
     [string]$Wav = "",
     [string]$WorkDir = (Join-Path $env:LOCALAPPDATA "Temp\opencode\live"),
     [switch]$NoPanel,
     [switch]$SkipBuild,
     [switch]$SkipInstall,
+    [switch]$WithGpu,
     [switch]$SkipTest,
     [switch]$NoLaunch,
     [switch]$KeepObsOpen,
@@ -95,12 +114,15 @@ if (-not $Elevated -and -not (Test-Admin)) {
         "-Name", "`"$Name`"",
         "-Seconds", "$Seconds",
         "-SampleRate", "$SampleRate",
+        "-InferenceDevice", "$InferenceDevice",
+        "-Model", "$Model",
         "-WorkDir", "`"$WorkDir`""
     )
     if ($Wav) { $a += @("-Wav", "`"$Wav`"") }
     if ($NoPanel) { $a += "-NoPanel" }
     if ($SkipBuild) { $a += "-SkipBuild" }
     if ($SkipInstall) { $a += "-SkipInstall" }
+    if ($WithGpu) { $a += "-WithGpu" }
     if ($SkipTest) { $a += "-SkipTest" }
     if ($NoLaunch) { $a += "-NoLaunch" }
     if ($KeepObsOpen) { $a += "-KeepObsOpen" }
@@ -232,7 +254,8 @@ if (-not $SkipBuild) {
         & (Join-Path $root "build.ps1")
     } else {
         # install.ps1 がビルドもやる（OBS が起動中だと DLL を上書きできない）。
-        & (Join-Path $root "install.ps1")
+        # GPU は追加パック扱いなので、明示されたときだけ入れる。
+        & (Join-Path $root "install.ps1") -WithGpu:$WithGpu
     }
 }
 
@@ -243,7 +266,7 @@ if (-not (Stop-Obs)) {
 
 # --- 3) シーンコレクション ---
 $pyArgs = @((Join-Path $root "tools\make_verify_collection.py"), "--name", $Name,
-    "--sample-rate", "$SampleRate")
+    "--sample-rate", "$SampleRate", "--device", $InferenceDevice, "--model", $Model)
 if ($Wav) { $pyArgs += @("--wav", $Wav) }
 & $py @pyArgs
 
@@ -371,7 +394,10 @@ try {
             Write-Warning "DPDFNET_ORT を設定してください（dpdfnet_onnxruntime.dll のあるディレクトリ）"
         }
         if (-not $env:DPDFNET_MODEL) {
-            $m = Join-Path $repo "plugin\models\dpdfnet8_48khz_hr_2out.onnx"
+            # 参照は「OBS 側で選んだモデル」と揃える必要がある（bit 一致を見るため）。
+            # `auto` は高品質優先で dpdfnet8 が選ばれるので、それに合わせる。
+            $file = if ($Model -eq "dp2") { "dpdfnet2_48khz_hr_2out.onnx" } else { "dpdfnet8_48khz_hr_2out.onnx" }
+            $m = Join-Path $repo "plugin\models\$file"
             if (Test-Path -LiteralPath $m) { $env:DPDFNET_MODEL = $m }
         }
         $env:DPDFNET_LIVE_DUMP = $dumpPrefix

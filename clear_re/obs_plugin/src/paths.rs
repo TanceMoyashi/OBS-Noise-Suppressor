@@ -108,6 +108,82 @@ impl ModelChoice {
 /// それを避けるため、読み込みは必ず絶対パス + `LOAD_WITH_ALTERED_SEARCH_PATH`。
 pub const ORT_DLL_NAMES: [&str; 2] = ["dpdfnet_onnxruntime.dll", "onnxruntime.dll"];
 
+/// GPU (DirectML) 用 ONNX Runtime のファイル名。
+///
+/// CPU 版とは**別の DLL**（DirectML EP 入りのビルド）を同梱している。同じ
+/// `onnxruntime.dll` という名前で 2 つ置けないため、名前を分けている。
+/// CPU 版にフォールバックはさせない（DML EP が無いビルドに DML を足すと
+/// セッション作成に失敗するだけで、原因が分かりにくくなる）。
+pub const ORT_DLL_NAMES_GPU: [&str; 1] = ["dpdfnet_onnxruntime_dml.dll"];
+
+/// ORT DLL の隣に置く、GPU 用の追加 DLL（見つかれば先に読み込む）。
+///
+/// `DirectML.dll` は ORT が**実行時に** `LoadLibrary` する。これは静的な
+/// import ではないので `LOAD_WITH_ALTERED_SEARCH_PATH` の恩恵を受けず、
+/// 同梱ディレクトリからは見つからない。あらかじめこちらから読んでおく。
+pub const GPU_SIDE_DLL_NAMES: [&str; 2] = ["DirectML.dll", "onnxruntime_providers_shared.dll"];
+
+/// 推論に使うデバイス（OBS のプロパティ「推論デバイス」）。
+///
+/// 既定は `Cpu`。**GPU は実測で CPU より遅い**（per-hop の dispatch / sync が
+/// 支配的なため。`OBS_VERIFY.md` の「GPU の実測」を参照）が、CPU 側の余裕が
+/// まったく無い環境向けに選択肢として残してある。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum DeviceChoice {
+    /// CPU（既定）。`ort_dll_candidates` の 1 番目を使う。
+    #[default]
+    Cpu,
+    /// GPU (DirectML)。同梱の `dpdfnet_onnxruntime_dml.dll` を使う。
+    Gpu,
+}
+
+impl DeviceChoice {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Gpu => "gpu",
+        }
+    }
+
+    /// 設定文字列から。未知の値（空文字など）は `Cpu`。
+    pub fn from_setting(s: &str) -> Self {
+        match s {
+            "gpu" | "dml" | "directml" => Self::Gpu,
+            _ => Self::Cpu,
+        }
+    }
+
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Cpu => 0,
+            Self::Gpu => 1,
+        }
+    }
+
+    pub fn from_code(c: u8) -> Self {
+        match c {
+            1 => Self::Gpu,
+            _ => Self::Cpu,
+        }
+    }
+
+    /// パネル / ログに出す短い名前。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Cpu => "CPU",
+            Self::Gpu => "GPU",
+        }
+    }
+
+    /// 探索する ORT DLL 名（優先順）。
+    pub fn ort_dll_names(self) -> &'static [&'static str] {
+        match self {
+            Self::Cpu => &ORT_DLL_NAMES,
+            Self::Gpu => &ORT_DLL_NAMES_GPU,
+        }
+    }
+}
+
 /// 自分自身 (`obs_noise_suppressor.dll`) が置かれているディレクトリ。
 pub fn own_dll_dir() -> Option<PathBuf> {
     unsafe extern "system" fn marker() {}
@@ -267,8 +343,9 @@ pub fn env_model_file() -> Option<PathBuf> {
     }
 }
 
-/// ONNX Runtime DLL の候補（優先順、すべて絶対パス）。
-pub fn ort_dll_candidates(extra_dirs: &[PathBuf]) -> Vec<PathBuf> {
+/// ONNX Runtime DLL の候補（優先順、すべて絶対パス）。`device` ごとに別の DLL。
+pub fn ort_dll_candidates(device: DeviceChoice, extra_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let names = device.ort_dll_names();
     let mut out: Vec<PathBuf> = Vec::new();
 
     // 1) 環境変数 (ファイルでもディレクトリでもよい)
@@ -277,7 +354,7 @@ pub fn ort_dll_candidates(extra_dirs: &[PathBuf]) -> Vec<PathBuf> {
         if p.is_file() {
             out.push(p);
         } else if p.is_dir() {
-            for name in ORT_DLL_NAMES {
+            for name in names {
                 out.push(p.join(name));
             }
         }
@@ -301,7 +378,7 @@ pub fn ort_dll_candidates(extra_dirs: &[PathBuf]) -> Vec<PathBuf> {
         );
     }
     for d in dirs {
-        for name in ORT_DLL_NAMES {
+        for name in names {
             out.push(d.join(name));
         }
     }

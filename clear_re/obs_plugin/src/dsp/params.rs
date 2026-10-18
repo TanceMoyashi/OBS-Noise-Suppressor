@@ -14,6 +14,8 @@ pub const VOICE: &CStr = c"voice";
 pub const VOICE_REVERB: &CStr = c"voiceReverb";
 /// `model` — 使うモデル。"auto" / "dp8" / "dp2"（`paths::ModelChoice`）。
 pub const MODEL: &CStr = c"model";
+/// `inferenceDevice` — 推論デバイス。"cpu" / "gpu"（`paths::DeviceChoice`）。
+pub const DEVICE: &CStr = c"inferenceDevice";
 /// `vuRef` — VU メーターの基準（0 VU = 何 dBFS）。"20" / "18" / "14"。
 pub const VU_REF: &CStr = c"vuRef";
 
@@ -49,6 +51,10 @@ pub const VOICE_REVERB_NEUTRAL: f32 = 1.0;
 
 /// 既定のモデル（`paths::ModelChoice::Auto`）。
 pub const MODEL_DEFAULT: &CStr = c"auto";
+/// 既定の推論デバイス（`paths::DeviceChoice::Cpu`）。
+///
+/// GPU (DirectML) は実測で CPU より遅いため、既定にはしない。
+pub const DEVICE_DEFAULT: &CStr = c"cpu";
 /// 既定の VU 基準（0 VU = -18 dBFS、EBU）。
 pub const VU_REF_DEFAULT: &CStr = c"18";
 

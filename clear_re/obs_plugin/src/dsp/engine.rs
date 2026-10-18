@@ -18,6 +18,7 @@ use super::net::DpdfNet;
 use super::params;
 use super::stft::VorbisStft;
 use super::INTERNAL_SAMPLE_RATE;
+use crate::paths::DeviceChoice;
 
 /// 実測した内容遅延（ホップ数）。`ANALYSIS.md` §13.2 / tools/sim_stream.py。
 pub const K_LATENCY_HOPS: usize = 6;
@@ -457,6 +458,8 @@ pub struct Engine {
     pub num_channels: usize,
     pub dereverb_available: bool,
     pub latency_samples: usize,
+    /// 実際に使った推論デバイス（`Gpu` 指定で失敗したときは `Cpu` になる）。
+    pub device: DeviceChoice,
     pub model_summary: String,
     /// OBS のレートが 48 kHz 以外のときだけ入るレート変換段。
     rack: Option<Box<Rack>>,
@@ -464,16 +467,34 @@ pub struct Engine {
     pub added_latency_ms: f32,
 }
 
+/// 必要なチャンネル数ぶんの ONNX セッションを作る（1 チャンネル = 1 セッション）。
+fn load_channels(
+    num_channels: usize,
+    model_path: &Path,
+    ort_dirs: &[PathBuf],
+    device: DeviceChoice,
+) -> Result<Vec<DpdfNet>, String> {
+    let mut channels = Vec::with_capacity(num_channels);
+    for _ in 0..num_channels {
+        channels.push(DpdfNet::load(model_path, 1, device, ort_dirs)?);
+    }
+    Ok(channels)
+}
+
 /// 音声スレッドで触る前に、UI スレッド（create / activate）で組み立てる。
 ///
 /// `num_channels` は 1 (モノラル) か 2 (ステレオ)。OBS の音声設定に対応する。
 /// `rate` は OBS が動いているサンプルレート。48 kHz 以外なら内部で 48 kHz へ
 /// 変換してから処理する（モデルが 48 kHz 前提のため）。
+///
+/// `device` はユーザーの設定。`Gpu` で組み立てられないときは警告を出して
+/// **CPU で組み直す**（音を止めるより、遅くても動く方を選ぶ）。
 pub fn build(
     num_channels: usize,
     rate: u32,
     model_path: &Path,
     ort_dirs: &[PathBuf],
+    device: DeviceChoice,
     meters: Arc<Meters>,
 ) -> Result<Engine, String> {
     let num_channels = num_channels.clamp(1, 2);
@@ -489,11 +510,21 @@ pub fn build(
     };
     let added_latency_ms = rack.as_ref().map_or(0.0, |r| r.added_ms);
 
-    let mut channels = Vec::with_capacity(num_channels);
-    for _ in 0..num_channels {
-        let engine = DpdfNet::load(model_path, 1, ort_dirs)?;
-        channels.push(engine);
-    }
+    let (channels, device_used) = match load_channels(num_channels, model_path, ort_dirs, device) {
+        Ok(ch) => (ch, device),
+        Err(e) if device == DeviceChoice::Gpu => {
+            crate::obs_log!(
+                crate::ffi::LOG_WARNING,
+                "GPU (DirectML) でモデルを読み込めないため CPU に切り替えます: {}",
+                e
+            );
+            (
+                load_channels(num_channels, model_path, ort_dirs, DeviceChoice::Cpu)?,
+                DeviceChoice::Cpu,
+            )
+        }
+        Err(e) => return Err(e),
+    };
 
     let meta = channels[0].meta.clone();
     let hop = meta.hop.max(0) as usize;
@@ -551,6 +582,7 @@ pub fn build(
         num_channels,
         dereverb_available,
         latency_samples: K_LATENCY_HOPS * hop,
+        device: device_used,
         rack,
         added_latency_ms,
         model_summary: format!(

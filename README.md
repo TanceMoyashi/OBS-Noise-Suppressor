@@ -44,12 +44,13 @@ ONNX Runtime と DPDFNet モデルを同梱した Windows x64 版で、追加の
 | 内容遅延 | **2880 サンプル = 60 ms 固定**（`kLatencyHops = 6` × hop 480。VST3 版と同一）。48 kHz 以外ではレート変換ぶん（約 2〜5 ms）が加算 |
 | 推論 | 同梱の ONNX Runtime 1.31.0（`dpdfnet_onnxruntime.dll`）+ DPDFNet モデル 4 つ |
 | モデル選択 | OBS プロパティで **自動 / 高品質 (dp8) / 軽量 (dp2)** を選択 |
+| 推論デバイス | OBS プロパティで **CPU（既定）/ GPU (DirectML)** を選択。**GPU は実測で CPU より遅い**ため追加パック扱い（下記） |
 | UI | 自前の Win32/GDI パネル（IN / OUT VU 2 本 + 縦フェーダー 3 本 + ミュート / バイパス + GR / 3 バンドメーター） |
 | プリセット | 1〜8 のスロット（`presets.json` に保存） |
 | VU 基準値 | −20 / −18 / −14 dBFS（既定 −18 = EBU）。目盛りが対応 dBFS ごと平行移動 |
 | 数値表示 | フェーダーの dB と %、IN / OUT の現在値 / ピーク dBFS、GR の抑圧量 dB |
 | インストーラー | レジストリ不使用 / 管理者権限不要 / アンインストーラー同梱 |
-| 音声スレッド | アロケーションなし（テンソル・バッファは事前確保し `IoBinding` で再利用） |
+| 音声スレッド | CPU はアロケーションなし（テンソル・バッファは事前確保し `IoBinding` で再利用）。GPU (DirectML) は毎 hop 束ねを作り直す（下記） |
 | 堅牢性 | FFI 境界ごとに `catch_unwind`。落ちずにパススルーへ退避 |
 | ログ | エラー / 警告 / 起動情報を専用ファイルに常時記録（OBS 標準ログにも同じ内容が出ます） |
 
@@ -90,14 +91,20 @@ OBS のプロパティにある **「パネルを開く（フェーダー / メ�
 - CPU は**高品質モデル (`dpdfnet8`) でコア 1 本をほぼ使い切る**ため、ノート PC や
   古い CPU では**軽量モデル (`dpdfnet2`)** を選んでください（負荷は約 1/3。
   実測値と自動切り替えの説明は [`clear_re/obs_plugin/README.md`](clear_re/obs_plugin/README.md#cpu-負荷の目安音が途切れる--遅れて聞こえるとき)）
+- GPU (DirectML) は**追加パック**（`OBS-Noise-Suppressor-<版>-gpu-pack.zip`）を
+  入れたときだけ選べます。**実測では GPU は CPU より遅い**ので（このマシン /
+  ステレオで `dp8` 6.68 → 12.73 ms、`dp2` 2.51 → 4.66 ms）、CPU に余裕があるなら
+  CPU のままをおすすめします。詳細は
+  [`clear_re/obs_plugin/OBS_VERIFY.md`](clear_re/obs_plugin/OBS_VERIFY.md#v030-追記-3推論デバイス-gpu-directml--2026-10-19)
 
 ## ビルド
 
 ```powershell
 cd clear_re\obs_plugin
 .\build.ps1                 # cargo build --release（配布する DLL）
-.\build.ps1 -Tests          # cargo test --release --lib（82 テスト）
+.\build.ps1 -Tests          # cargo test --release --lib（83 テスト）
 .\tools\make_package.ps1    # 配布パッケージ (dist\) と ZIP を作る
+.\tools\make_package.ps1 -GpuPack  # GPU (DirectML) の追加パックを作る
 .\tools\run_obs_verify.ps1  # OBS を実際に回して遅延と DSP を数値で確認する
 ```
 

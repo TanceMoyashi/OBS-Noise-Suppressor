@@ -23,17 +23,38 @@ use windows::Win32::Foundation::HMODULE;
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD_WITH_ALTERED_SEARCH_PATH};
 
 use crate::paths;
+use crate::paths::DeviceChoice;
 
 /// `OrtGetApiBase` の型。
 type GetApiBaseFn = unsafe extern "system" fn() -> *const OrtApiBase;
 
-struct Runtime {
-    api: &'static OrtApi,
+pub struct Runtime {
+    pub api: &'static OrtApi,
     dll_path: PathBuf,
     version: String,
+    /// `*mut OrtEnv`。このランタイム（= この DLL）専用の 1 本。
+    ///
+    /// CPU 版と GPU 版は別の DLL なので、OrtEnv も別に持つ必要がある。
+    env: usize,
     /// HMODULE は解放しない（プロセス終了まで保持）。生ポインタは `Send`/`Sync`
     /// でないためアドレスとして持つ。
     _module_addr: usize,
+}
+
+impl Runtime {
+    pub fn api(&self) -> &'static OrtApi {
+        self.api
+    }
+
+    /// `*const OrtEnv` として使う。
+    pub fn env_addr(&self) -> usize {
+        self.env
+    }
+
+    /// ログ用（読み込んだ DLL とそのバージョン）。
+    pub fn description(&self) -> String {
+        format!("onnxruntime {} ({})", self.version, self.dll_path.display())
+    }
 }
 
 // SAFETY: Runtime が持つのはロード済み DLL 内の静的データへの参照だけで、
@@ -41,30 +62,37 @@ struct Runtime {
 unsafe impl Send for Runtime {}
 unsafe impl Sync for Runtime {}
 
-static RUNTIME: OnceLock<Result<Runtime, String>> = OnceLock::new();
+static RUNTIME_CPU: OnceLock<Result<Runtime, String>> = OnceLock::new();
+static RUNTIME_GPU: OnceLock<Result<Runtime, String>> = OnceLock::new();
 
-/// `dpdfnet_onnxruntime.dll` を読み込み、`OrtApi` (ORT_API_VERSION = 17) を返す。
+/// 同梱 ONNX Runtime を読み込み、`OrtApi` を返す（結果はデバイスごとに 1 回だけ）。
 ///
 /// 初回だけ実際にロードし、以降はその結果（失敗も含む）を返す。
-pub fn ensure_loaded(extra_dirs: &[PathBuf]) -> Result<&'static OrtApi, String> {
-    match RUNTIME.get_or_init(|| {
-        let r = load(extra_dirs);
+pub fn ensure_loaded(device: DeviceChoice, extra_dirs: &[PathBuf]) -> Result<&'static Runtime, String> {
+    let slot = match device {
+        DeviceChoice::Cpu => &RUNTIME_CPU,
+        DeviceChoice::Gpu => &RUNTIME_GPU,
+    };
+
+    match slot.get_or_init(|| {
+        let r = load(device, extra_dirs);
         // どの DLL を掴んだかは不具合切り分けの要（System32 の ORT と取り違えやすい）。
         match &r {
             Ok(rt) => crate::obs_log!(
                 crate::ffi::LOG_INFO,
-                "onnxruntime {} ({}) を読み込みました",
-                rt.version,
-                rt.dll_path.display()
+                "onnxruntime を読み込みました: {}",
+                rt.description()
             ),
             Err(e) => crate::obs_log!(
                 crate::ffi::LOG_WARNING,
-                "onnxruntime を読み込めません: {e}"
+                "onnxruntime を読み込めません ({}): {}",
+                device.label(),
+                e
             ),
         }
         r
     }) {
-        Ok(rt) => Ok(rt.api),
+        Ok(rt) => Ok(rt),
         Err(e) => Err(e.clone()),
     }
 }
@@ -74,21 +102,31 @@ pub fn ensure_loaded(extra_dirs: &[PathBuf]) -> Result<&'static OrtApi, String> 
 /// 実運用では `ensure_loaded` が同じ内容を OBS のログへ出す。
 #[cfg(test)]
 pub fn description() -> String {
-    match RUNTIME.get() {
-        Some(Ok(rt)) => format!("onnxruntime {} ({})", rt.version, rt.dll_path.display()),
-        Some(Err(e)) => e.clone(),
-        None => "onnxruntime not loaded yet".to_string(),
+    description_for(DeviceChoice::Cpu)
+}
+
+/// デバイスごとのロード結果（テスト用）。
+#[cfg(test)]
+pub fn description_for(device: DeviceChoice) -> String {
+    let slot = match device {
+        DeviceChoice::Cpu => &RUNTIME_CPU,
+        DeviceChoice::Gpu => &RUNTIME_GPU,
+    };
+    match slot.get() {
+        Some(Ok(rt)) => rt.description(),
+        Some(Err(e)) => format!("load failed: {e}"),
+        None => "not loaded yet".to_string(),
     }
 }
 
-fn load(extra_dirs: &[PathBuf]) -> Result<Runtime, String> {
-    let candidates = paths::ort_dll_candidates(extra_dirs);
+fn load(device: DeviceChoice, extra_dirs: &[PathBuf]) -> Result<Runtime, String> {
+    let candidates = paths::ort_dll_candidates(device, extra_dirs);
 
     if candidates.is_empty() {
         return Err(format!(
-            "dpdfnet_onnxruntime.dll が見つかりません。探索先: {} \
-             （DPDFNET_ORT で明示指定できます）",
-            paths::ort_dll_candidates(&[])
+            "{} が見つかりません。探索先: {} （DPDFNET_ORT で明示指定できます）",
+            device.ort_dll_names().join(" / "),
+            paths::ort_dll_candidates(device, &[])
                 .iter()
                 .map(|p| p.display().to_string())
                 .collect::<Vec<_>>()
@@ -98,7 +136,7 @@ fn load(extra_dirs: &[PathBuf]) -> Result<Runtime, String> {
 
     let mut tried = Vec::new();
     for path in candidates {
-        match open(&path) {
+        match open(device, &path) {
             Ok(rt) => return Ok(rt),
             Err(e) => tried.push(format!("{}: {}", path.display(), e)),
         }
@@ -110,12 +148,29 @@ fn load(extra_dirs: &[PathBuf]) -> Result<Runtime, String> {
     ))
 }
 
-fn open(path: &PathBuf) -> Result<Runtime, String> {
+fn open(device: DeviceChoice, path: &PathBuf) -> Result<Runtime, String> {
     let wide = to_wide_path(path);
 
     // SAFETY: wide は NUL 終端済み。絶対パスなので ALTERED_SEARCH_PATH が有効。
     let h: HMODULE = unsafe { LoadLibraryExW(PCWSTR(wide.as_ptr()), None, LOAD_WITH_ALTERED_SEARCH_PATH) }
         .map_err(|e| format!("LoadLibraryExW: {e}"))?;
+
+    if device == DeviceChoice::Gpu {
+        // DirectML.dll は ORT が LoadLibrary で後から読むので、先に同じ
+        // ディレクトリのものを読んでおく（無ければシステムのものになる）。
+        if let Some(dir) = path.parent() {
+            for name in paths::GPU_SIDE_DLL_NAMES {
+                let side = dir.join(name);
+                if side.is_file() {
+                    let w = to_wide_path(&side);
+                    // 失敗しても致命的ではないので結果は見ない。
+                    let _ = unsafe {
+                        LoadLibraryExW(PCWSTR(w.as_ptr()), None, LOAD_WITH_ALTERED_SEARCH_PATH)
+                    };
+                }
+            }
+        }
+    }
 
     // SAFETY: h は直前にロードした有効なモジュール。
     let proc = unsafe { GetProcAddress(h, PCSTR(b"OrtGetApiBase\0".as_ptr())) };
@@ -156,12 +211,33 @@ fn open(path: &PathBuf) -> Result<Runtime, String> {
     // SAFETY: ORT が返した OrtApi はプロセス終了まで有効な静的データ。
     let api: &'static OrtApi = unsafe { &*api_ptr };
 
+    let env = create_env(api)?;
+
     Ok(Runtime {
         api,
         dll_path: path.clone(),
         version,
+        env,
         _module_addr: h.0 as usize,
     })
+}
+
+/// このランタイム用の `OrtEnv` を 1 つ作る（解放しない）。
+fn create_env(api: &'static OrtApi) -> Result<usize, String> {
+    let mut env: *mut ort_sys::OrtEnv = std::ptr::null_mut();
+    // SAFETY: api は有効な OrtApi、env は有効な書き込み先。
+    let st = unsafe {
+        (api.CreateEnv)(
+            logging_level(),
+            c"obs-noise-suppressor".as_ptr() as *const c_char,
+            &mut env,
+        )
+    };
+    check(api, st)?;
+    if env.is_null() {
+        return Err("CreateEnv が NULL を返した".to_string());
+    }
+    Ok(env as usize)
 }
 
 /// `OrtStatus*` を検査して、エラーならメッセージを返す（status は消費する）。
@@ -197,35 +273,4 @@ pub fn logging_level() -> OrtLoggingLevel {
 fn to_wide_path(p: &std::path::Path) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
     p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
-}
-
-// --------------------------------------------------------------------------
-// プロセスで 1 つの OrtEnv
-// --------------------------------------------------------------------------
-
-static ENV: OnceLock<Result<usize, String>> = OnceLock::new();
-
-/// `OrtEnv` をプロセスで 1 つだけ作る（OrtRuntime.cpp と同じ方針）。
-///
-/// 戻り値は `*mut OrtEnv`。解放しない（プロセス終了まで保持）。
-pub fn global_env(api: &'static OrtApi) -> Result<usize, String> {
-    match ENV.get_or_init(|| {
-        let mut env: *mut ort_sys::OrtEnv = std::ptr::null_mut();
-        // SAFETY: api は有効な OrtApi、env は有効な書き込み先。
-        let st = unsafe {
-            (api.CreateEnv)(
-                logging_level(),
-                c"obs-noise-suppressor".as_ptr() as *const c_char,
-                &mut env,
-            )
-        };
-        check(api, st)?;
-        if env.is_null() {
-            return Err("CreateEnv が NULL を返した".to_string());
-        }
-        Ok(env as usize)
-    }) {
-        Ok(v) => Ok(*v),
-        Err(e) => Err(e.clone()),
-    }
 }

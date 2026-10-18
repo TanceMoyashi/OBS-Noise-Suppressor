@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use super::engine;
 use super::engine::Meters;
+use crate::paths::DeviceChoice;
 
 // --------------------------------------------------------------------------
 // ヘルパ
@@ -257,12 +258,14 @@ fn debug_steps() {
     };
 
     eprintln!("A: loading ort");
-    let api = super::ort::ensure_loaded(std::slice::from_ref(&ort_dir)).expect("ort");
+    let api = super::ort::ensure_loaded(DeviceChoice::Cpu, std::slice::from_ref(&ort_dir)).expect("ort");
     eprintln!("B: ort ok api_version={} {}", super::ort::api_version(), super::ort::description());
     let _ = api;
 
     eprintln!("C: loading model");
-    let mut net = super::net::DpdfNet::load(&model, 1, std::slice::from_ref(&ort_dir)).expect("load");
+    let mut net =
+        super::net::DpdfNet::load(&model, 1, DeviceChoice::Cpu, std::slice::from_ref(&ort_dir))
+            .expect("load");
     eprintln!(
         "D: load ok freq_bins={} state={} dereverb={} err={}",
         net.freq_bins(),
@@ -337,7 +340,7 @@ fn debug_paths() {
     padded.extend_from_slice(&x);
     let x = padded;
 
-    let mut eng = engine::build(1, 48_000, &model, std::slice::from_ref(&ort_dir), Arc::new(Meters::new()))
+    let mut eng = engine::build(1, 48_000, &model, std::slice::from_ref(&ort_dir), DeviceChoice::Cpu, Arc::new(Meters::new()))
         .expect("build");
     let hop = eng.hop();
 
@@ -396,7 +399,7 @@ fn offline_latency_and_channel_consistency() {
     let block = 1024usize;
 
     // ---- 1 ch ----
-    let mut eng1 = engine::build(1, 48_000, &model, std::slice::from_ref(&ort_dir), Arc::new(Meters::new()))
+    let mut eng1 = engine::build(1, 48_000, &model, std::slice::from_ref(&ort_dir), DeviceChoice::Cpu, Arc::new(Meters::new()))
         .expect("エンジン構築に失敗");
     let hop = eng1.hop();
     assert_eq!(hop, 480, "hop は 480 であること");
@@ -435,7 +438,7 @@ fn offline_latency_and_channel_consistency() {
     );
 
     // ---- 2 ch (同一入力を 2 回) ----
-    let mut eng2 = engine::build(2, 48_000, &model, std::slice::from_ref(&ort_dir), Arc::new(Meters::new()))
+    let mut eng2 = engine::build(2, 48_000, &model, std::slice::from_ref(&ort_dir), DeviceChoice::Cpu, Arc::new(Meters::new()))
         .expect("ステレオエンジン構築に失敗");
     let stereo_in = vec![x.clone(), x.clone()];
     let y2 = run_stream(&mut eng2, &stereo_in, block, params);
@@ -460,7 +463,7 @@ fn offline_latency_and_channel_consistency() {
     assert!(max_diff_lr <= 1e-6, "L/R が独立していない (max diff {max_diff_lr})");
 
     // ---- 決定性 ----
-    let mut eng3 = engine::build(1, 48_000, &model, std::slice::from_ref(&ort_dir), Arc::new(Meters::new()))
+    let mut eng3 = engine::build(1, 48_000, &model, std::slice::from_ref(&ort_dir), DeviceChoice::Cpu, Arc::new(Meters::new()))
         .expect("エンジン再構築に失敗");
     let y3 = run_stream(&mut eng3, std::slice::from_ref(&x), block, params);
     let max_diff3 = y1[0]
@@ -469,6 +472,129 @@ fn offline_latency_and_channel_consistency() {
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f32, f32::max);
     assert!(max_diff3 == 0.0, "決定的でない (max diff {max_diff3})");
+}
+
+/// GPU (DirectML) で組んだエンジンが、CPU と同じ遅延・同じ音になること。
+///
+/// **既定では走らせない**（`DPDFNET_TEST_GPU=1` のときだけ有効）。理由:
+///   * DML 入りの ONNX Runtime（`dpdfnet_onnxruntime_dml.dll`）と実機の GPU が要る
+///   * 結果はビット一致しない（DML は別のカーネルで計算する）
+///   * この環境では GPU のほうが遅いので、常用の検証に混ぜると時間が伸びる
+///
+/// 実行:
+/// ```text
+/// set DPDFNET_ORT=D:\...\clear_re\obs_plugin\vendor
+/// set DPDFNET_MODEL=D:\...\models\dpdfnet2_48khz_hr_2out.onnx
+/// set DPDFNET_TEST_GPU=1
+/// cargo test --release --lib offline_gpu -- --nocapture
+/// ```
+#[test]
+fn offline_gpu_matches_cpu() {
+    if std::env::var("DPDFNET_TEST_GPU").ok().as_deref() != Some("1") {
+        eprintln!("skip: DPDFNET_TEST_GPU=1 で有効");
+        return;
+    }
+    let Some(ort_dir) = env_path("DPDFNET_ORT") else {
+        eprintln!("skip: DPDFNET_ORT が未設定");
+        return;
+    };
+    let Some(model) = env_path("DPDFNET_MODEL") else {
+        eprintln!("skip: DPDFNET_MODEL が未設定");
+        return;
+    };
+    let Some(wav) = find_test_wav() else {
+        eprintln!("skip: テスト用 WAV が見つからない");
+        return;
+    };
+
+    let (mut x, sr) = read_wav_mono(&wav).expect("WAV 読み込み失敗");
+    assert_eq!(sr, 48_000);
+    let pad = (0.2 * sr as f64) as usize;
+    x.truncate(4 * sr as usize);
+    let mut padded = vec![0.0f32; pad];
+    padded.extend_from_slice(&x);
+    let x = padded;
+
+    let params = engine::ParamSnapshot::default();
+    let block = 1024usize;
+
+    let mut cpu = engine::build(
+        1,
+        48_000,
+        &model,
+        std::slice::from_ref(&ort_dir),
+        DeviceChoice::Cpu,
+        Arc::new(Meters::new()),
+    )
+    .expect("CPU エンジン構築に失敗");
+    let y_cpu = run_stream(&mut cpu, std::slice::from_ref(&x), block, params);
+
+    let mut gpu = engine::build(
+        1,
+        48_000,
+        &model,
+        std::slice::from_ref(&ort_dir),
+        DeviceChoice::Gpu,
+        Arc::new(Meters::new()),
+    )
+    .expect("GPU エンジン構築に失敗");
+    assert_eq!(
+        gpu.device,
+        DeviceChoice::Gpu,
+        "GPU を指定したのに CPU に落ちている（DML 版 ORT / DirectML.dll / GPU を確認）"
+    );
+    assert_eq!(
+        gpu.latency_samples, cpu.latency_samples,
+        "GPU と CPU で遅延が違う"
+    );
+
+    let y_gpu = run_stream(&mut gpu, std::slice::from_ref(&x), block, params);
+
+    // 遅延は入力との相関で測る（CPU と同じ 2880 になること）。
+    let (lag, corr) = estimate_lag(&x, &y_gpu[0], 24_000, 16);
+    eprintln!(
+        "gpu: lag = {lag} samples ({:.1} ms) corr = {corr:.4}",
+        lag as f64 / sr as f64 * 1000.0
+    );
+    assert_eq!(
+        lag,
+        engine::K_LATENCY_HOPS * cpu.hop(),
+        "GPU 経路の遅延が {} サンプルではない (実測 {lag})",
+        engine::K_LATENCY_HOPS * cpu.hop()
+    );
+
+    // 音の一致（ビット一致はしない。SNR で見る）。
+    let max_diff = y_cpu[0]
+        .iter()
+        .zip(y_gpu[0].iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    let snr = snr_db(&y_cpu[0], &y_gpu[0]);
+    eprintln!(
+        "gpu: max|diff| = {max_diff:e}  snr = {snr:.1} dB  (cpu rms {:.6} / gpu rms {:.6})",
+        rms(&y_cpu[0]),
+        rms(&y_gpu[0])
+    );
+    assert!(rms(&y_gpu[0]) > 1e-5, "GPU の出力が無音");
+    assert!(
+        snr > 30.0,
+        "GPU の出力が CPU と離れすぎている (snr {snr:.1} dB, max|diff| {max_diff:e})"
+    );
+}
+
+/// 2 つの信号の SNR [dB]（`test` を `ref` に対する誤差とみなす）。
+fn snr_db(reference: &[f32], test: &[f32]) -> f64 {
+    let n = reference.len().min(test.len());
+    let p_ref: f64 = reference[..n].iter().map(|v| (*v as f64).powi(2)).sum();
+    let p_err: f64 = reference[..n]
+        .iter()
+        .zip(&test[..n])
+        .map(|(a, b)| ((*a - *b) as f64).powi(2))
+        .sum();
+    if p_err <= 0.0 {
+        return f64::INFINITY;
+    }
+    10.0 * (p_ref / p_err).log10()
 }
 
 /// OBS 実機のダンプ（`DPDFNET_DUMP`）を、同じ DSP に通した結果と突き合わせる。
@@ -543,6 +669,7 @@ fn live_dump_matches_reference() {
         sr,
         &model,
         std::slice::from_ref(&ort_dir),
+        DeviceChoice::Cpu,
         Arc::new(Meters::new()),
     )
     .expect("エンジン構築に失敗");
@@ -659,6 +786,7 @@ fn offline_rate_conversion_96k() {
         48_000,
         &model,
         std::slice::from_ref(&ort_dir),
+        DeviceChoice::Cpu,
         Arc::new(Meters::new()),
     )
     .expect("48 kHz エンジン構築に失敗");
@@ -670,6 +798,7 @@ fn offline_rate_conversion_96k() {
         96_000,
         &model,
         std::slice::from_ref(&ort_dir),
+        DeviceChoice::Cpu,
         Arc::new(Meters::new()),
     )
     .expect("96 kHz エンジン構築に失敗");

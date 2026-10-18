@@ -529,6 +529,102 @@ OBS のレートを変えて回すときはハーネスに `-SampleRate` を渡�
   `ff8854e89eb60dc706db90338e15947c6d837eda4fa6bad60c310a13b38f87fe`。
   上の節の ZIP（`e74dc1e0…` = パネル改修版）を置き換えたもの）
 
+### v0.3.0 追記 3（推論デバイス: GPU (DirectML) / 2026-10-19）
+
+負荷が高い環境向けに、プロパティで**推論デバイス**を選べるようにした
+（既定 `cpu` / `gpu` = DirectML）。**実測では GPU は CPU より遅い**ので既定は
+CPU のまま。GPU は**追加パック**（`OBS-Noise-Suppressor-<版>-gpu-pack.zip`。
+`tools\make_package.ps1 -GpuPack` で作る）を入れたときだけ選べる。本体は CPU
+のみで配るので、入っていなければ選択肢が無効になり、理由が説明欄に出る。
+
+**実測（このマシン / ステレオ / 1 ホップ = 10 ms の予算 / OBS 内のログ）**:
+
+| モデル | CPU | GPU (DirectML) |
+| --- | --- | --- |
+| `dpdfnet2`（軽量） | 2.51 ms (25 %)、最大 3.53 ms | 4.66 ms (47 %)、最大 10.16 ms |
+| `dpdfnet8`（高品質） | 6.68 ms (67 %) | **12.73 ms (127 %)**、最大 25.77 ms |
+
+- GPU は**速くならない**。Python（公式 API）でも同じで、CPU を他のスレッドに
+  奪われた状態（4 本のビジーループを同時に回す）でも順位は変わらない
+  （CPU 3.17 ms / DirectML 7.29 ms）。測り方は
+  `clear_re/plugin/tools/bench_provider.py --providers cpu dml --instances 2`
+- 1 ホップが小さいため、DML の dispatch / sync の固定費が計算より大きい
+
+**見つけて直した不具合（重要）**: `OrtValue` と `OrtIoBinding` を使い回すと、
+DirectML は**最初に転送した入力をそのまま使い続ける**。ホスト側のバッファを
+書き換えても再転送されず、状態 (`state_out` → `state_in`) が初期値に固定されて
+**モデルの出力が無音になる**（残るのは乾いた音の漏れだけ）。エラーは出ないので、
+症状は「ノイズも声も消える」に見える。
+
+- 切り分け: 同じモデルを Python の公式 API で回すと CPU と 96 dB で一致し、
+  **束ねを使い回した場合だけ**再現した（`fixed` = 出力が完全に 0）
+- 直し方: GPU のときだけ**束ねを毎 hop 作り直す**（`net.rs::run_gpu_inner`）。
+  既定の CPU 経路は使い回しのまま（実機でビット一致を確認した経路を変えない）
+- 効果: オフラインの GPU テストが CPU と 134 dB（`max|diff| = 1.8e-7`）で一致
+
+**GPU の注意点**:
+
+- 出力は CPU と**ビット一致しない**（丸めが違う）。実機のダンプ比較（同じ入力、
+  50 秒）では SNR **66 dB**（5 秒ごとに見て 52 – 83 dB）で、聴感上の差は無い
+  （`dp2` / 25 秒の記録で最大 6.1e-4、信号のピークは 0.12）
+- 追加パックが **+35.9 MB**（`DirectML.dll` 18,527,776 / `dpdfnet_onnxruntime_dml.dll`
+  17,328,152 / `onnxruntime_providers_shared.dll` 22,040 bytes）
+- 高負荷時は自動フォールバックが働く（GPU + `dpdfnet8` はこのマシンでは確実に
+  発火する。下の実機ログを参照）
+
+**追加パックの中身（出所とハッシュ）**:
+
+| ファイル | サイズ | 出所 | SHA256 |
+| --- | --- | --- | --- |
+| `dpdfnet_onnxruntime_dml.dll` | 17,328,152 | Microsoft.ML.OnnxRuntime.DirectML 1.24.4（`runtimes/win-x64/native/onnxruntime.dll` を改名） | `e7eedec6a6f26dc39dc948276a75ef6d2bee3fff944d874ceed0bbd3b97bff40` |
+| `onnxruntime_providers_shared.dll` | 22,040 | 同上 | `265c8daf29637cb259cac8be9f08f2cd45f3883f0f0e4949cbfddd5b4cbec3b6` |
+| `DirectML.dll` | 18,527,776 | Microsoft.AI.DirectML 1.15.4（`bin/x64-win/DirectML.dll`） | `9c9e6d822561c6c41b90e6994b3e8857cf1d66dbfb1e0c4c799c7c89b4e92da1` |
+
+MIT ライセンス。CPU 版の `dpdfnet_onnxruntime.dll`（1.31.0 /
+`0c42dc4e278f0968fdf9ebf1b1e54a74c657a9942e70803e453c91993451cf4c`）とは**別物**で、
+CPU 実行のビット一致を守るために名前を分けて同居させている（実行するデバイスに
+よって読み込む方が変わる）。
+
+**このマシンでの検証結果**:
+
+- 自動テスト: Debug で **83 passed / 0 failed**。`DPDFNET_ORT` / `DPDFNET_MODEL`
+  を設定した Release では `dsp::offline_tests` 6 本（`offline_gpu_matches_cpu` を
+  含む）。ビルドの警告 0 件
+- `offline_gpu_matches_cpu`（`DPDFNET_TEST_GPU=1`）: `dp2` は lag 2880 /
+  `max|diff| = 1.8e-7` / **136.9 dB**、`dp8` は **134.2 dB**
+- 実機 CPU（`-Model dp2` と `-Model auto`）: オフライン参照と
+  **1,260,928 / 1,207,680 frames × 2 ch / max diff = 0e0**（ビット一致。
+  デバイスを足した後も CPU 経路は変わっていない）
+- 実機 GPU（`-InferenceDevice gpu -Model dp2 -SkipTest -WithGpu`）: `dev GPU` +
+  `onnxruntime 1.24.4`（`dpdfnet_onnxruntime_dml.dll`）で構築に成功。ダンプ比較で
+  入力は `max diff = 0e0`、出力は SNR **66 dB**
+- **自動フォールバックの実機発火を確認**（これまで未確認だった）: GPU +
+  `dpdfnet8` の回で `平均 12.73 ms (127 %)` を検出し、3 秒後に
+  `負荷が高いため、自動的に軽量モデル (dp2) へ切替えました` が出た。切り替え後は
+  予算内に収まる
+- 差し替えた配布物（v0.3.0 のまま）:
+  - DLL: **1,710,592 bytes** / SHA256
+    `082f359115235657f0a50efe8dae5050f5847913f666ff4e6a0fa0d2f38355df`
+    （`target\release` とパッケージ内がバイト一致）
+  - 本体 ZIP: `OBS-Noise-Suppressor-0.3.0-win64.zip`（53,462,886 bytes / SHA256
+    `11a2a62c15925cd002785331a53477df3a054520833700d88b69b9f75ed9c883`。
+    **GPU の DLL は入っていない**）
+  - GPU 追加パック: `OBS-Noise-Suppressor-0.3.0-gpu-pack.zip`（15,543,242 bytes /
+    SHA256 `0305d70ed192776181ca6e8bd8d9ba8d018ba016de4c273e0caa49405f436794`）
+  - → 追記 2 に記録した DLL / ZIP のハッシュはこの版で置き換わる
+
+**ハーネスの使い方**:
+
+```powershell
+# CPU / モデルを固定（負荷を測りやすい。auto だと自動切替が挟まる）
+.\tools\run_obs_verify.ps1 -Model dp2
+# GPU。CPU とビット一致しないのでテストは回さない（-WithGpu で DLL も入れる）
+.\tools\run_obs_verify.ps1 -InferenceDevice gpu -Model dp2 -SkipTest -WithGpu
+```
+
+GPU で回したダンプは `tools/compare_dumps.py` で CPU のダンプと突き合わせる
+（入力が `max diff = 0e0`、出力が SNR 55 dB 以上なら同じ音）。
+
 ## 7. ライセンス表示（GitHub の判定）
 
 GitHub は `LICENSE` を **licensee** で判定する。しきい値は「正規テキストとの語彙一致
