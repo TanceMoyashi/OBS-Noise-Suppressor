@@ -87,13 +87,16 @@ OBS のプロパティにある **「パネルを開く（フェーダー / メ�
 - OBS Studio 28 以降 / Windows x64（検証は 32.2.2）
 - OBS の音声設定は **44.1 / 48 / 88.2 / 96 / 176.4 / 192 kHz** など（48 kHz 以外は
   内部で 48 kHz に変換して処理します。変換段を作れない異常値のときだけパススルー）
+- CPU は**高品質モデル (`dpdfnet8`) でコア 1 本をほぼ使い切る**ため、ノート PC や
+  古い CPU では**軽量モデル (`dpdfnet2`)** を選んでください（負荷は約 1/3。
+  実測値と自動切り替えの説明は [`clear_re/obs_plugin/README.md`](clear_re/obs_plugin/README.md#cpu-負荷の目安音が途切れる--遅れて聞こえるとき)）
 
 ## ビルド
 
 ```powershell
 cd clear_re\obs_plugin
 .\build.ps1                 # cargo build --release（配布する DLL）
-.\build.ps1 -Tests          # cargo test --release --lib（62 テスト）
+.\build.ps1 -Tests          # cargo test --release --lib（82 テスト）
 .\tools\make_package.ps1    # 配布パッケージ (dist\) と ZIP を作る
 .\tools\run_obs_verify.ps1  # OBS を実際に回して遅延と DSP を数値で確認する
 ```
@@ -140,7 +143,12 @@ ONNX Runtime とモデルは `vendor/` と `clear_re/plugin/models/` に入っ�
   そのまま通る（`rack_keeps_sample_counts_and_level`）
 - フェーダーごとのミュート / バイパスは**既定が有効**なので音声経路は変わらない
   （実機のダンプ照合は新しい DLL でも `max diff = 0e0`）
-- `cargo test --release --lib` → **69 passed / 0 failed**、ビルド警告 0 件
+- リアルタイム余裕の診断: 1 ホップ（10 ms）ごとの処理時間をアトミックに足し込み、
+  監視スレッドが 1 秒ごとに判定。実機（48 kHz / ステレオ / 高品質）で
+  `1 ホップ平均 7.2 – 8.6 ms / 予算 10.00 ms（72 – 86 %）`。間に合わない状態が
+  続くと 1 度だけ軽量モデルへ自動で切り替えます（判定は `src/load.rs` の
+  純関数 + 10 テスト）
+- `cargo test --release --lib` → **82 passed / 0 failed**、ビルド警告 0 件
 
 ## ログ
 
@@ -156,6 +164,7 @@ OBS 標準のログ（`%APPDATA%\obs-studio\logs\*.txt`）にも同じ内容が�
 2026-10-18 19:56:55.078 [INFO] dll: C:\ProgramData\obs-studio\plugins\obs_noise_suppressor\bin\64bit
 2026-10-18 19:56:55.183 [INFO] filter created (ambience 0.50, voice 0.00 dB, reverb 0.00)
 2026-10-18 19:56:55.514 [INFO] status: 96 kHz / ch=2 / latency 2880 samples (60 ms) / dpdfnet8_48khz_hr_2out.onnx | n_fft=960 hop=480 state=90228 outputs=2
+2026-10-18 19:56:56.520 [INFO] 音声処理の負荷: 1 ホップ平均 7.25 ms / 予算 10.00 ms (73 %)、最大 8.80 ms
 2026-10-18 19:57:21.646 [INFO] filter destroyed
 ```
 

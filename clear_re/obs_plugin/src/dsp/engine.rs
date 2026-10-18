@@ -12,6 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use super::net::DpdfNet;
 use super::params;
@@ -49,6 +50,25 @@ impl Default for ParamSnapshot {
     }
 }
 
+/// 1 ホップぶんの処理時間の累計（リアルタイム余裕の診断用）。
+///
+/// `hops` / `sum_us` は累計なので、監視側は 2 点の差分を取れば
+/// 「直近 1 秒の平均」が出せる（累計どうしの引き算なので、
+/// 途中でエンジンが組み直されても数値が飛ばない）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DspStats {
+    /// 計測したホップ数。
+    pub hops: u64,
+    /// 予算（= 1 ホップの実時間）を超えたホップ数。
+    pub over: u64,
+    /// 処理時間の合計 [µs]。
+    pub sum_us: u64,
+    /// 単発の最大 [µs]。
+    pub max_us: u32,
+    /// 1 ホップの予算 [µs]。0 = 未設定（計測なし）。
+    pub budget_us: u32,
+}
+
 /// レベルメータ。オーディオスレッドが書き、UI スレッドが読む。
 ///
 /// すべてリニア RMS（フルスケール = 1.0）。UI 側で dB / VU / GR に変換する。
@@ -70,6 +90,14 @@ pub struct Meters {
     /// パネルはこれを見て「前回の描画から新しい音声が来たか」を判定し、
     /// 来ていなければ針を静止位置へ戻す（無音時に針が止まらないように）。
     seq: AtomicU64,
+
+    /// リアルタイム余裕の診断（`DspStats`）。オーディオスレッドが 1 ホップ
+    /// ごとに足し込み、監視スレッド（`filter::watchdog`）が読む。
+    dsp_hops: AtomicU64,
+    dsp_over: AtomicU64,
+    dsp_sum_us: AtomicU64,
+    dsp_max_us: AtomicU32,
+    dsp_budget_us: AtomicU32,
 }
 
 impl Meters {
@@ -84,6 +112,11 @@ impl Meters {
                 [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)],
             ],
             seq: AtomicU64::new(0),
+            dsp_hops: AtomicU64::new(0),
+            dsp_over: AtomicU64::new(0),
+            dsp_sum_us: AtomicU64::new(0),
+            dsp_max_us: AtomicU32::new(0),
+            dsp_budget_us: AtomicU32::new(0),
         }
     }
 
@@ -154,6 +187,50 @@ impl Meters {
     #[inline]
     pub(crate) fn set_out_peak(&self, ch: usize, v: f32) {
         self.out_peak[ch.min(1)].store(v.to_bits(), Ordering::Relaxed);
+    }
+
+    /// 1 ホップぶんの処理時間 [µs] を足し込む。
+    ///
+    /// オーディオスレッドから呼ぶ。ロックもアロケーションもしない
+    /// （リラックスしたアトミックの読み書きだけ）。
+    #[inline]
+    pub(crate) fn record_dsp_time(&self, us: u32) {
+        let budget = self.dsp_budget_us.load(Ordering::Relaxed);
+        self.dsp_hops.fetch_add(1, Ordering::Relaxed);
+        self.dsp_sum_us.fetch_add(us as u64, Ordering::Relaxed);
+        if budget != 0 && us > budget {
+            self.dsp_over.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // 最大値は診断用なので、緩い競合は許容する。
+        let mut cur = self.dsp_max_us.load(Ordering::Relaxed);
+        while us > cur {
+            match self.dsp_max_us.compare_exchange_weak(
+                cur,
+                us,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(v) => cur = v,
+            }
+        }
+    }
+
+    /// 1 ホップの予算 [µs] を決める（エンジン構築時に 1 回）。
+    pub(crate) fn set_dsp_budget_us(&self, us: u32) {
+        self.dsp_budget_us.store(us, Ordering::Relaxed);
+    }
+
+    /// 負荷の累計。監視スレッドが読む。
+    pub fn dsp_stats(&self) -> DspStats {
+        DspStats {
+            hops: self.dsp_hops.load(Ordering::Relaxed),
+            over: self.dsp_over.load(Ordering::Relaxed),
+            sum_us: self.dsp_sum_us.load(Ordering::Relaxed),
+            max_us: self.dsp_max_us.load(Ordering::Relaxed),
+            budget_us: self.dsp_budget_us.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -426,6 +503,9 @@ pub fn build(
         return Err("モデルの hop / freq_bins が不正".to_string());
     }
 
+    // リアルタイム余裕の診断: 予算 = 1 ホップぶんの実時間（480 @48k = 10 ms）。
+    meters.set_dsp_budget_us((hop as u64 * 1_000_000 / INTERNAL_SAMPLE_RATE as u64).max(1) as u32);
+
     let mut chans: Vec<Channel> = Vec::with_capacity(num_channels);
     for engine in channels {
         let mut c = Channel::new(engine, hop, freq_bins);
@@ -637,7 +717,12 @@ impl Engine {
 
             // run_hop() は out_fifo を上書きするので、必ず上の書き出しの後に呼ぶ。
             if hop_just_completed {
+                // リアルタイムに間に合っているかを診断できるように、ホップの
+                // 処理時間を控える（`Instant::now()` 2 回 = 数十 ns 程度）。
+                let t0 = Instant::now();
                 self.run_hop(p);
+                self.meters
+                    .record_dsp_time(t0.elapsed().as_micros().min(u32::MAX as u128) as u32);
                 self.in_fill = 0;
                 self.out_fill = hop;
                 self.out_read = 0;
@@ -859,6 +944,27 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 負荷の計測が「予算超過だけ」を数えること。
+    #[test]
+    fn meters_records_dsp_time() {
+        let m = Meters::new();
+        // 予算が未設定（= エンジン未構築）のうちは超過を数えない。
+        m.record_dsp_time(999_999);
+        assert_eq!(m.dsp_stats().over, 0);
+
+        m.set_dsp_budget_us(10_000);
+        m.record_dsp_time(2_000);
+        m.record_dsp_time(12_000); // 予算超過
+        m.record_dsp_time(3_000);
+
+        let s = m.dsp_stats();
+        assert_eq!(s.hops, 4);
+        assert_eq!(s.over, 1);
+        assert_eq!(s.sum_us, 999_999 + 2_000 + 12_000 + 3_000);
+        assert_eq!(s.max_us, 999_999);
+        assert_eq!(s.budget_us, 10_000);
+    }
 
     /// レート変換段そのものの確認（モデルも ONNX Runtime も要らない。
     /// `core` は素通しのダミー）。

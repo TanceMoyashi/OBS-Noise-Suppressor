@@ -15,6 +15,7 @@ mod dsp;
 mod dump;
 mod ffi;
 mod filter;
+mod load;
 mod log;
 mod meter;
 mod paths;

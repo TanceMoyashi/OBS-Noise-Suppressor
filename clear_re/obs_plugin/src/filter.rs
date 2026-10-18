@@ -35,11 +35,13 @@ use std::ptr;
 use std::sync::atomic::{
     AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
 };
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use crate::obs_log;
 use crate::dump::Dump;
-use crate::dsp::engine::{self, Engine, Meters, ParamSnapshot};
+use crate::dsp::engine::{self, DspStats, Engine, Meters, ParamSnapshot};
 use crate::dsp::ort;
 use crate::dsp::params as dsp;
 use crate::paths;
@@ -327,6 +329,19 @@ pub struct FilterData {
     /// 今のエンジンが想定しているサンプルレート。OBS の設定変更で変わる。
     engine_rate: AtomicU32,
 
+    /// 監視スレッドが「軽量へ落とす」と決めたときの強制指定
+    /// (`paths::ModelChoice::code()`、`FORCED_NONE` = なし）。ユーザーの設定は
+    /// 書き換えない（次に OK を押すと解除される）。
+    forced_model: AtomicU8,
+
+    /// エンジンの組み立ての直列化。監視スレッドと UI スレッド
+    /// (`update`) が同時に組み直さないようにする。
+    rebuild_lock: Mutex<()>,
+
+    /// 負荷の監視スレッド（間に合っていないかをログに出し、必要なら軽量
+    /// モデルへ落とす）。`destroy` で停止させてから join する。
+    watchdog: Mutex<Option<Watchdog>>,
+
     /// 差し替えで引退したエンジン。オーディオスレッドがまだ使っている可能性が
     /// あるので、`destroy` まで保持する。
     retired: Mutex<Vec<*mut Engine>>,
@@ -360,6 +375,9 @@ impl FilterData {
             engine_channels: AtomicUsize::new(0),
             engine_model: AtomicU8::new(u8::MAX),
             engine_rate: AtomicU32::new(0),
+            forced_model: AtomicU8::new(FORCED_NONE),
+            rebuild_lock: Mutex::new(()),
+            watchdog: Mutex::new(None),
             retired: Mutex::new(Vec::new()),
             passthrough_logged: AtomicBool::new(false),
             last_timestamp: AtomicU64::new(0),
@@ -379,9 +397,16 @@ impl FilterData {
         self.shared.set_status_detail(status, detail)
     }
 
-    /// エンジンを（必要なら）組み立てる。UI スレッド専用
-    /// (`create` / `update` / `activate` から呼ぶ)。
+    /// エンジンを（必要なら）組み立てる。UI スレッド
+    /// (`create` / `update` / `activate`) と監視スレッドから呼ぶ。
     pub fn activate_engine(&self) -> bool {
+        // 監視スレッドと `update` が同時に組み立てないように直列化する
+        // （組み立ては数百 ms かかるので、待たされる側には影響しない）。
+        let _rebuild = match self.rebuild_lock.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+
         let audio = unsafe { crate::ffi::obs_get_audio() };
         if audio.is_null() {
             self.set_status_detail(ST_INACTIVE, "OBS audio がまだ初期化されていない");
@@ -403,7 +428,14 @@ impl FilterData {
         }
 
         let want = (unsafe { crate::ffi::audio_output_get_channels(audio) } as usize).clamp(1, 2);
-        let want_model = self.shared.params.model();
+        // 監視スレッドが「負荷が高いので軽量へ」と決めたときはその指定を使う
+        // （ユーザーの設定「自動」は書き換えない。次に OK を押すと解除される）。
+        let forced = self.forced_model.load(Ordering::Relaxed);
+        let want_model = if forced == FORCED_NONE {
+            self.shared.params.model()
+        } else {
+            paths::ModelChoice::from_code(forced)
+        };
 
         let cur = self.engine.load(Ordering::Acquire);
         if !cur.is_null()
@@ -496,11 +528,17 @@ impl FilterData {
                 } else {
                     String::new()
                 };
+                // 負荷で自動的に落ちている場合は、そのことが分かるように書く
+                // （プロパティの設定は「自動」のままなので、混乱しないように）。
+                let model_label = if forced == FORCED_NONE {
+                    want_model.as_str().to_string()
+                } else {
+                    format!("{} (負荷により自動切替)", want_model.as_str())
+                };
                 self.shared.set_summary(format!(
-                    "{want} ch  ·  {}  ·  遅延 {eng_latency} samples ({lat_ms:.0} ms{src})  ·  dereverb {}  ·  model {}",
+                    "{want} ch  ·  {}  ·  遅延 {eng_latency} samples ({lat_ms:.0} ms{src})  ·  dereverb {}  ·  model {model_label}",
                     rate_label(sr),
                     if dereverb { "あり" } else { "なし" },
-                    want_model.as_str()
                 ));
                 true
             }
@@ -626,7 +664,15 @@ pub unsafe extern "C" fn create(
         // (2) 映像を持たない音声ソースでは `activate` が来ず、
         // パススルーのまま動かなくなる。`create` は必ず呼ばれる。
         fd.activate_engine();
-        Box::into_raw(fd) as *mut c_void
+
+        // 負荷の監視を始める。監視スレッドは `FilterData` のポインタを使うので、
+        // `Box::into_raw` の後（= アドレスが確定した後）に始める。
+        let fd = Box::into_raw(fd);
+        if let Some(w) = spawn_watchdog(fd) {
+            // SAFETY: `fd` は今作った有効なポインタ。
+            unsafe { (*fd).set_watchdog(w) };
+        }
+        fd as *mut c_void
     })
 }
 
@@ -638,6 +684,9 @@ pub unsafe extern "C" fn destroy(data: *mut c_void) {
         let fd = Box::from_raw(data as *mut FilterData);
         // パネルが `source` に触らないように先に落とす。
         fd.shared.alive.store(false, Ordering::SeqCst);
+        // 監視スレッドを先に止める（止めるまで、この先の後始末
+        // (`drop_engine` / `free_retired`) と競合させない）。
+        fd.stop_watchdog();
         ui::close_panel(&fd.shared);
         fd.drop_engine();
         // 差し替えで引退したエンジンもここでまとめて破棄する
@@ -696,7 +745,15 @@ pub unsafe extern "C" fn update(data: *mut c_void, settings: *mut crate::ffi::ob
         }
         // アトミック書き込みのみ。エンジンには触らない。
         let fd = &*(data as *const FilterData);
+        // ユーザーがプロパティでモデルを選び直したときだけ、自動フォールバックの
+        // 指定を解除する。パネルのつまみを動かしただけの `update`
+        // (`push_settings` 経由) でもここを通るので、無条件に解除すると
+        // 高品質へ組み直してまた音が途切れてしまう。
+        let before = fd.shared.params.model();
         fd.shared.params.read_settings(settings);
+        if fd.shared.params.model() != before {
+            fd.forced_model.store(FORCED_NONE, Ordering::Relaxed);
+        }
         // レート/チャンネル数が変わっていたら作り直す。古いエンジンは
         // `retired` に積まれるので、オーディオスレッドが使用中でも安全。
         // (モデル未配置のまま起動した後、配置してから「OK」を押した場合の
@@ -1026,4 +1083,231 @@ pub unsafe extern "C" fn filter_audio(
     }
 
     audio
+}
+
+// --------------------------------------------------------------------------
+// 負荷の監視
+// --------------------------------------------------------------------------
+//
+// DPDFNet の推論は 1 ホップ = 480 サンプル (10 ms) ごとに走る。この 10 ms に
+// 間に合わないと OBS の音声スレッドが詰まり、音が途切れて「音が遅れる」ように
+// 見える。速い CPU でも高品質モデル (`dpdfnet8`) は 1 コアの 7 割を使うので、
+//
+//   * 余裕がどれくらいあるかを 1 行だけログに残す（切り分け用）
+//   * 間に合っていない状態が続いたら、1 度だけ軽量モデルへ自動で落とす
+//
+// を行う。判定は `crate::load`（純関数）側にある。
+
+/// 自動フォールバックの指定が無いことを表す値（`engine_model` と同じ流儀）。
+const FORCED_NONE: u8 = u8::MAX;
+
+/// 監視の周期。短くしておくと `destroy` の待ち時間も短くなる。
+const WATCH_PERIOD: Duration = Duration::from_millis(1000);
+
+/// 同じ警告を出し直す最短の間隔。
+const WARN_INTERVAL: Duration = Duration::from_secs(60);
+
+/// 監視スレッドのハンドル。
+struct Watchdog {
+    stop: mpsc::Sender<()>,
+    handle: JoinHandle<()>,
+}
+
+/// 監視スレッドへ渡す `FilterData` ポインタ。生ポインタは `Send` ではないので包む。
+///
+/// 安全に使える根拠: 監視スレッドは `destroy` の `stop_watchdog()` で
+/// join されるまで生きており、join が終わるまで `FilterData` は破棄されない。
+struct FdPtr(*mut FilterData);
+unsafe impl Send for FdPtr {}
+
+fn spawn_watchdog(fd: *mut FilterData) -> Option<Watchdog> {
+    let (tx, rx) = mpsc::channel::<()>();
+    let ptr = FdPtr(fd);
+    let handle = std::thread::Builder::new()
+        .name("obs-noise-suppressor-load".to_string())
+        .spawn(move || watchdog_loop(ptr, rx))
+        .ok()?;
+    Some(Watchdog { stop: tx, handle })
+}
+
+fn watchdog_loop(ptr: FdPtr, rx: mpsc::Receiver<()>) {
+    let mut prev = DspStats::default();
+    let mut reported = false;
+    let mut slow_streak = 0u32;
+    let mut last_warn: Option<Instant> = None;
+    let mut fell_back = false;
+
+    loop {
+        // 終了指示が来たら抜ける（周期ごとに目を覚ます）。
+        match rx.recv_timeout(WATCH_PERIOD) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+
+        // SAFETY: `destroy` は `stop_watchdog()`（= このスレッドの join）を
+        // 済ませてから `FilterData` を破棄する。
+        let fd = unsafe { &*ptr.0 };
+        if !fd.shared.alive.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let cur = fd.shared.meters.dsp_stats();
+        let Some(load) = crate::load::sample(prev, cur) else {
+            // まだサンプルが足りない（無音でホップが進んでいない等）。
+            continue;
+        };
+        prev = cur;
+
+        if !reported {
+            reported = true;
+            obs_log!(
+                crate::ffi::LOG_INFO,
+                "音声処理の負荷: 1 ホップ平均 {:.2} ms / 予算 {:.2} ms ({:.0} %)、最大 {:.2} ms",
+                load.avg_ms,
+                load.budget_ms,
+                load.usage_pct(),
+                load.max_ms
+            );
+        }
+
+        if !load.slow {
+            slow_streak = 0;
+            continue;
+        }
+
+        if last_warn.map_or(true, |t| t.elapsed() >= WARN_INTERVAL) {
+            last_warn = Some(Instant::now());
+            obs_log!(
+                crate::ffi::LOG_WARNING,
+                "音声処理がリアルタイムに間に合っていません (1 ホップ {:.2} ms の枠に平均 {:.2} ms、予算超過 {:.0} %、最大 {:.2} ms)。音が途切れる場合は、プロパティの「モデル」を「軽量 (dp2)」にすると負荷が約 1/3 になります",
+                load.budget_ms,
+                load.avg_ms,
+                load.over_pct,
+                load.max_ms
+            );
+        }
+
+        // 自動フォールバックは「本当に間に合っていない」ときだけ。予算ぎりぎり
+        // で動いている機械で、一時的な負荷変動だけに反応しないようにする。
+        if !load.critical {
+            slow_streak = 0;
+            continue;
+        }
+
+        slow_streak += 1;
+        if fell_back || slow_streak < crate::load::FALLBACK_STREAK {
+            continue;
+        }
+
+        // 1 度だけ試す（軽量モデルが無い / ユーザーが明示指定しているときは
+        // 切り替えない）。
+        fell_back = true;
+        if fd.fallback_to_light() {
+            obs_log!(
+                crate::ffi::LOG_WARNING,
+                "負荷が高いため、自動的に軽量モデル (dp2) へ切り替えました (平均 {:.2} ms / 予算 {:.2} ms)。プロパティの「モデル」は「自動」のままです。プロパティでモデルを選び直すと元の指定に戻ります",
+                load.avg_ms,
+                load.budget_ms
+            );
+        }
+    }
+}
+
+impl FilterData {
+    fn set_watchdog(&self, w: Watchdog) {
+        let mut g = match self.watchdog.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        *g = Some(w);
+    }
+
+    /// 監視スレッドを止めて join する（`destroy` の最初に呼ぶ）。
+    fn stop_watchdog(&self) {
+        let w = {
+            let mut g = match self.watchdog.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            g.take()
+        };
+        if let Some(w) = w {
+            let _ = w.stop.send(());
+            let _ = w.handle.join();
+        }
+    }
+
+    /// 軽量モデルへ組み替える（監視スレッドから呼ぶ）。実際に強制指定を
+    /// 入れて組み立て直したら true。
+    fn fallback_to_light(&self) -> bool {
+        let ok = can_fallback_to_light(
+            // モデルを固定している（検証時）なら触らない。
+            paths::env_model_file().is_some(),
+            // ユーザーの明示指定は尊重する（「自動」のときだけ落とす）。
+            self.shared.params.model(),
+            // すでに軽量で動いているなら何もしない。
+            self.engine_model.load(Ordering::Relaxed),
+            paths::find_model_choice(paths::ModelChoice::Fast, &self.resource_dirs).is_some(),
+        );
+        if !ok {
+            return false;
+        }
+
+        self.forced_model
+            .store(paths::ModelChoice::Fast.code(), Ordering::Relaxed);
+        // ここで組めなくても `forced_model` の指定は残るので、次に
+        // `update` / `activate` が来たときに軽量で組み直される。
+        self.activate_engine()
+    }
+}
+
+/// 自動フォールバックをしてよいか（純関数。テストしやすいように分離）。
+///
+///   * `env_model`: `DPDFNET_MODEL` でモデルを固定している
+///   * `chosen`: ユーザーの設定（「自動」のときだけ落とす）
+///   * `current`: 今のエンジンのモデル（`u8::MAX` = エンジン未構築）
+///   * `light_available`: 軽量モデル (`dpdfnet2`) が探索先にある
+fn can_fallback_to_light(
+    env_model: bool,
+    chosen: paths::ModelChoice,
+    current: u8,
+    light_available: bool,
+) -> bool {
+    !env_model
+        && chosen == paths::ModelChoice::Auto
+        && current != paths::ModelChoice::Fast.code()
+        && light_available
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fallback_needs_auto_model_and_a_light_model() {
+        use paths::ModelChoice::{Auto, Fast, Quality};
+
+        // 自動 + 未構築 + 軽量あり → 落としてよい。
+        assert!(can_fallback_to_light(false, Auto, u8::MAX, true));
+        // 高品質を明示指定している → 落とさない（警告だけ）。
+        assert!(!can_fallback_to_light(false, Quality, u8::MAX, true));
+        // 軽量を明示指定 → 落とす必要がない。
+        assert!(!can_fallback_to_light(false, Fast, u8::MAX, true));
+        // すでに軽量で動いている → 何もしない。
+        assert!(!can_fallback_to_light(false, Auto, Fast.code(), true));
+        // 軽量モデルが置かれていない → 落とせない。
+        assert!(!can_fallback_to_light(false, Auto, u8::MAX, false));
+        // `DPDFNET_MODEL` で固定している（検証時）→ 触らない。
+        assert!(!can_fallback_to_light(true, Auto, u8::MAX, true));
+    }
+
+    /// レート表記（ログとパネルで同じものを使う）。
+    #[test]
+    fn rate_label_prefers_khz_for_round_numbers() {
+        assert_eq!(rate_label(48_000), "48 kHz");
+        assert_eq!(rate_label(96_000), "96 kHz");
+        assert_eq!(rate_label(8_000), "8 kHz");
+        // 1000 の倍数でないレートは Hz のまま（44.1 kHz は `44100 Hz`）。
+        assert_eq!(rate_label(44_100), "44100 Hz");
+    }
 }
