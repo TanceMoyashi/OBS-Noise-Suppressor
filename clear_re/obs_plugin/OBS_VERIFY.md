@@ -609,8 +609,8 @@ CPU 実行のビット一致を守るために名前を分けて同居させて�
   - 本体 ZIP: `OBS-Noise-Suppressor-0.3.0-win64.zip`（53,462,886 bytes / SHA256
     `11a2a62c15925cd002785331a53477df3a054520833700d88b69b9f75ed9c883`。
     **GPU の DLL は入っていない**）
-  - GPU 追加パック: `OBS-Noise-Suppressor-0.3.0-gpu-pack.zip`（15,543,242 bytes /
-    SHA256 `0305d70ed192776181ca6e8bd8d9ba8d018ba016de4c273e0caa49405f436794`）
+  - GPU 追加パック: `OBS-Noise-Suppressor-0.3.0-gpu-pack.zip`（15,543,817 bytes /
+    SHA256 `63e32409956d739b86d633c9bd356c7364c31ff34fe426311ce4569c75eab153`）
   - → 追記 2 に記録した DLL / ZIP のハッシュはこの版で置き換わる
 
 **ハーネスの使い方**:
