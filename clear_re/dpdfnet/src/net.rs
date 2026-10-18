@@ -165,6 +165,38 @@ impl DpdfNet {
         });
         opt!(unsafe { (api.SetSessionExecutionMode)(options, ExecutionMode::ORT_SEQUENTIAL) });
 
+        // ---- ここは実測で決めている。動かす前に測り直すこと ----
+        //
+        // 計測 (Ryzen 9 9950X3D / ORT 1.31.0 / 48 kHz ステレオ / 1 hop = 480
+        // サンプル = 10 ms、候補を交互に測った中央値):
+        //
+        //   1 ホップの内訳: ONNX 推論 ~99 %、それ以外 (STFT + ブレンド +
+        //   メーター + FIFO) は約 10 µs = 0.1〜0.5 %。STFT 単体は 4 µs 程度。
+        //   => 推論以外を削っても意味は無い。効くのは推論そのものだけ。
+        //
+        //   dp8 (2out, ステレオ): 既定 5.3 ms (53 %) / dp2: 2.2 ms (22 %)。
+        //   `SetIntraOpNumThreads` は 1 が最良 (既定 = 1): 2 で +5〜7 %、4 で
+        //   +12〜15 % (CPU は 3〜7 倍)、0 (自動 = 32 threads) は dp8 で
+        //   22 ms = 予算の 216 % と論外。この小さなモデルでは ORT の
+        //   スレッド間同期のほうが計算より高い。追加スレッドは CPU を
+        //   食うだけで遅くなるので **1 のまま**。
+        //
+        //   実行モード `ORT_PARALLEL` / `DisableCpuMemArena` / `DisableMemPattern`
+        //   / グラフ最適化 `EXTENDED`・`BASIC` は、いずれも中央値が
+        //   ±5 % 以内か悪化 (最大 +15 %)。**既定 (SEQUENTIAL / arena on /
+        //   mem pattern on / ORT_ENABLE_ALL) が最良**なので変えない。
+        //
+        //   2 出力 (`_2out`) と 1 出力 (`_hr`) の推論時間差は測定ノイズ未満
+        //   (dp8 ステレオ 5.63 vs 5.60 ms)。残響ヘッドは無視できるほど軽く、
+        //   1 出力へ切り替えても CPU は下がらない (機能が減るだけ)。
+        //
+        //   ステレオはチャンネルごとにセッション + Run を分けたまま (5.3 ms)。
+        //   モデルの batch 次元が固定 1 なので batch=2 の 1 Run は作れない。
+        //   仮に再エクスポートしても、このモデルは層ごとの計算なので
+        //   期待できる短縮は 1 Run あたりの固定費 (数十 µs) 程度。
+        //
+        // 補足: `measure_hop_us` と `bench_provider.py` で誰でも同じ数字が出る。
+
         if device == DeviceChoice::Gpu {
             // DirectML は **mem pattern 最適化と並列実行に対応しない**（公式
             // ドキュメント）。特に mem pattern を有効にしたままだと、内部の
