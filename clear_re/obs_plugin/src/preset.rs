@@ -7,8 +7,9 @@
 //! 依存を増やさないため JSON は自前で書く / 読む。読む方は壊れた行を
 //! 飛ばすだけで、例外も panic もしない（読めなかったスロットは空になる）。
 //!
-//! スロットに入れるのは**音に関わる設定**（AMBIENCE / VOICE / REVERB と
-//! モデル）。VU の基準値はメーターの表示設定なので含めない。
+//! スロットに入れるのは**音に関わる設定**（AMBIENCE / VOICE / REVERB と、
+//! そのミュート / バイパス、モデル）。VU の基準値はメーターの表示設定なので
+//! 含めない。
 
 use crate::dsp::params;
 use crate::paths;
@@ -25,6 +26,10 @@ pub struct Preset {
     pub ambience: f32,
     pub voice_db: f32,
     pub reverb: f32,
+    /// フェーダーごとのミュート / バイパス（つまみの値は上の 3 つ）。
+    pub ambience_mode: params::FeatureMode,
+    pub voice_mode: params::FeatureMode,
+    pub reverb_mode: params::FeatureMode,
     /// `paths::ModelChoice::as_str()` の値。
     pub model: String,
 }
@@ -35,6 +40,9 @@ impl Default for Preset {
             ambience: params::AMBIENCE_DEFAULT as f32,
             voice_db: params::VOICE_DEFAULT as f32,
             reverb: params::VOICE_REVERB_DEFAULT as f32,
+            ambience_mode: params::FeatureMode::default(),
+            voice_mode: params::FeatureMode::default(),
+            reverb_mode: params::FeatureMode::default(),
             model: paths::ModelChoice::default().as_str().to_string(),
         }
     }
@@ -69,10 +77,15 @@ pub fn render(slots: &[Option<Preset>; SLOTS]) -> String {
         match slot {
             Some(p) => {
                 out.push_str(&format!(
-                    "{{\"ambience\": {}, \"voice_db\": {}, \"reverb\": {}, \"model\": \"{}\"}}",
+                    "{{\"ambience\": {}, \"voice_db\": {}, \"reverb\": {}, \
+                     \"ambience_mode\": \"{}\", \"voice_mode\": \"{}\", \
+                     \"reverb_mode\": \"{}\", \"model\": \"{}\"}}",
                     num(p.ambience),
                     num(p.voice_db),
                     num(p.reverb),
+                    p.ambience_mode.as_str(),
+                    p.voice_mode.as_str(),
+                    p.reverb_mode.as_str(),
                     p.model
                 ));
             }
@@ -218,6 +231,16 @@ fn parse_slot(elem: &str) -> Option<Preset> {
     if let Some(v) = get_string(elem, "model") {
         p.model = v.to_string();
     }
+    // ミュート / バイパス（無い場合は既定 = 有効）。
+    if let Some(v) = get_string(elem, "ambience_mode") {
+        p.ambience_mode = params::FeatureMode::from_setting(v);
+    }
+    if let Some(v) = get_string(elem, "voice_mode") {
+        p.voice_mode = params::FeatureMode::from_setting(v);
+    }
+    if let Some(v) = get_string(elem, "reverb_mode") {
+        p.reverb_mode = params::FeatureMode::from_setting(v);
+    }
 
     if any {
         Some(p)
@@ -295,6 +318,9 @@ mod tests {
             ambience: 0.62,
             voice_db: 2.5,
             reverb: 0.28,
+            ambience_mode: params::FeatureMode::Mute,
+            voice_mode: params::FeatureMode::Bypass,
+            reverb_mode: params::FeatureMode::Active,
             model: "dp8".to_string(),
         }
     }
@@ -308,6 +334,7 @@ mod tests {
             voice_db: -12.0,
             reverb: 1.0,
             model: "dp2".to_string(),
+            ..Default::default()
         });
 
         let text = render(&slots);
@@ -318,10 +345,15 @@ mod tests {
         assert!((a.voice_db - 2.5).abs() < 1e-5);
         assert!((a.reverb - 0.28).abs() < 1e-5);
         assert_eq!(a.model, "dp8");
+        // ミュート / バイパスも往復すること。
+        assert_eq!(a.ambience_mode, params::FeatureMode::Mute);
+        assert_eq!(a.voice_mode, params::FeatureMode::Bypass);
+        assert_eq!(a.reverb_mode, params::FeatureMode::Active);
 
         let b = back[4].clone().expect("slot 5");
         assert_eq!(b.voice_db, -12.0);
         assert_eq!(b.model, "dp2");
+        assert_eq!(b.ambience_mode, params::FeatureMode::Active);
 
         assert!(back[1].is_none());
         assert!(back[7].is_none());
@@ -343,6 +375,10 @@ mod tests {
         assert!((p.ambience - 0.25).abs() < 1e-6);
         assert_eq!(p.voice_db, params::VOICE_DEFAULT as f32);
         assert_eq!(p.model, "auto");
+        // 古い presets.json（キーが無い）は「有効」で読めること。
+        assert_eq!(p.ambience_mode, params::FeatureMode::Active);
+        assert_eq!(p.voice_mode, params::FeatureMode::Active);
+        assert_eq!(p.reverb_mode, params::FeatureMode::Active);
     }
 
     #[test]

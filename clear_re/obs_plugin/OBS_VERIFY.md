@@ -150,13 +150,18 @@ test result: ok. 1 passed; 0 failed
 | `speech_tail_reverb_48k.wav`（残響つき） | 残響が締まる。**Voice Reverb 0→1 で尾が明らかに消える** |
 | **Ambience** 左→右 | 左で最大抑圧、右で入力に近づく（環境ノイズが戻る） |
 | **Voice** −12→+12 | 高域の色づけと音量の変化 |
+| AMBIENCE の **MUTE / BYP** | MUTE で環境ノイズが完全に消える（0 %）/ BYP で素の入力に近づく（100 %）。**つまみの値表示は暗くなるが位置は動かない**。同じキーをもう一度で有効へ、BYP を押すと MUTE が落ちる |
+| VOICE の **MUTE / BYP** | MUTE で presence が最小（−12 dB）/ BYP で無色（0 dB）。**効きが切り替わって**聞こえる |
+| REVERB の **MUTE / BYP** | MUTE で残響が消える（0 %）/ BYP で素の残響（100 %）。1 出力モデルではキーごと暗くて押せない |
+| MUTE / BYP と**プリセット** | MUTE にした状態で SAVE → 値を変えて呼び出すと MUTE ごと戻る。OBS 再起動後も残る |
 | **BYPASS** | 素通しに戻る。**遅延は維持されない**（切り替えると音の位置が 60 ms 飛ぶ） |
 | **モデル** を dp8 ↔ dp2 | 数十 ms 無音になったあと、効きと CPU 負荷が変わる（dp2 が軽い） |
 | **VU 基準値** を −20 / −18 / −14 | 針の位置と VU 目盛りが平行移動する（音は変わらない） |
 | **メモリー** SAVE → 番号 | LED が点く。別の値にして番号を押すと戻る。OBS 再起動後も残る |
 | **メモリー** Ctrl + 番号 | 消去され、LED が消える |
-| フェーダー / VU の **dB と %** | 数字が実際の値と一致する（VU の窓 = 現在値とピーク dBFS） |
-| VU 窓を**ダブルクリック** | ピークホールドが消える |
+| フェーダー / VU の **dB と %** | 数字が実際の値と一致する（VU の窓 = 名前 + 現在値とピーク dBFS） |
+| **IN / OUT の針** | 抑圧が掛かると OUT の針が IN より左に落ちる（ステレオは L / R の平均、モノラルはそのまま） |
+| VU 窓を**ダブルクリック** | その窓のピークホールドが消える（IN / OUT どちらでも） |
 
 **リアルタイム性の確認（重要）**:
 
@@ -383,6 +388,50 @@ OBS のレートを変えて回すときはハーネスに `-SampleRate` を渡�
   が梱包した DLL に `Cargo.toml` のバージョン文字列が入っているか検査し、
   無ければ例外で止める。バージョンを上げたら必ず `build.ps1 -Configuration Release`
   （または `install.ps1`）で cdylib を作り直すこと。
+
+### v0.3.0 追記（IN / OUT VU + フェーダーごとのミュート / バイパス / 2026-10-18）
+
+パネルの 2 本の VU を **入力（IN）と出力（OUT）** に変え、3 本のフェーダー
+（AMBIENCE / VOICE / REVERB）それぞれに **MUTE / BYP キー**を足した版。
+バージョン番号は上げていない（v0.3.0 のまま資産を差し替え）。
+
+**設計上の要点**: モードの既定は **有効（Active）** なので、**DSP の音声経路は従来と
+1 ビットも変わらない**（`apply(v, min, neutral)` を通すだけで、既定では
+`v` がそのまま返る）。したがって上の節のビット一致・遅延の実測はそのまま有効で、
+今回**新しい DLL でも取り直して同じ値**になることを確認した。
+
+| キー | AMBIENCE | VOICE | REVERB |
+| --- | --- | --- | --- |
+| **MUTE**（赤 LED） | 0 %（暗騒音を残さない） | −12 dB | 0 %（残響を残さない） |
+| **BYP**（アンバー LED） | 100 %（そのまま） | 0 dB（掛けない） | 100 %（そのまま） |
+
+- MUTE と BYP は**排他**（同じキーをもう一度押すと有効へ戻る 3 状態）。
+  **つまみの値と保存値は書き換えず**、効きだけを差し替える（値表示は暗くなる）。
+- 設定キーは `ambienceMode` / `voiceMode` / `voiceReverbMode`
+  （`"active"` / `"mute"` / `"bypass"`）。OBS プロパティにも各スライダーの直後に
+  3 択リストとして出る。プリセット JSON も `ambience_mode` / `voice_mode` /
+  `reverb_mode` を保存する（**キーが無い古いプリセットは Active として読む**）。
+- メーターは**ステレオで L / R の平均**を 1 本の針にまとめる（モノラルは ch0 のみ）。
+  死んでいるチャンネルで半分に落ちないよう、割る相手はチャンネル数で変えている。
+
+**このマシンでの検証結果**:
+
+- 自動テスト: `cargo test --release --lib` → **69 passed / 0 failed**、
+  `cargo build --release` のビルド警告 **0 件**（Debug / Release の両方で確認）
+- 実機（OBS 32.2.2 / `tools/run_obs_verify.ps1` / 25 秒）:
+  `lag = 2880 samples (60.0 ms)` / 相関 `0.8186` / in_rms `0.116016` / out_rms `0.027953`、
+  オフライン参照との差は **1,260,928 frames / max diff = 0e0 / diff rms = 0e0**（ビット一致）、
+  `live_dump_matches_reference` 1 passed
+- 実機のパネル（`panel_live.png`）で **IN / OUT の 2 本の VU（名前つきの窓）**と
+  **3 本ぶんの MUTE / BYP キー**が正しく描画されることを確認（既定は有効 = LED 消灯）
+- オフラインのスナップショット（`DPDFNET_SNAPSHOT_DIR` を設定して
+  `cargo test --lib ui::`）で、**MUTE 点灯 / BYP 点灯 / 1 出力モデルでの REVERB 無効化**の
+  3 通りを目視確認（`panel-modes.bmp` など）
+- ビルドした DLL: 1,640,960 bytes / SHA256
+  `444afdad2a9bb01601d055e9d67908c477ceebac234af760acbd15c754e1ec38`
+  （配布 ZIP 内・インストール済みとバイト一致）
+- 配布 ZIP: `OBS-Noise-Suppressor-0.3.0-win64.zip`（53,434,905 bytes、SHA256
+  `e74dc1e0dd05b6003f15f4c302bda49f1975e5af8e88524e1d91fc8165ddc9b7`）
 
 ## 7. ライセンス表示（GitHub の判定）
 

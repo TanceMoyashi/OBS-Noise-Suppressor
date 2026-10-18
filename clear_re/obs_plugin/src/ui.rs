@@ -5,8 +5,11 @@
 //! 業務用オーディオ機器風（実機の VU メーターとコンソールを参考にしている）。
 //!
 //!   * ヘッダ（タイトル + サブタイトル + メモリー 1〜8 + SAVE）
-//!   * INPUT   : 入力 L / R のアナログ VU メーター（針 + VU 目盛り）+ 数値表示
-//!   * CONTROL : 縦フェーダー 3 本（AMBIENCE / VOICE / REVERB）+ dB / % の併記
+//!   * IN / OUT: 入力（加工前）と出力（加工後）のアナログ VU メーター
+//!               （針 + VU 目盛り）+ 現在値 / ピークの数値窓。ステレオは
+//!               L/R の指標を 1 本にまとめる（`crate::meter` 参照）
+//!   * CONTROL : 縦フェーダー 3 本（AMBIENCE / VOICE / REVERB）+ dB / % の併記、
+//!               各フェーダーの下に MUTE / BYP キー（つまみの位置は保つ）
 //!   * EFFECT  : GR メーター（コンプの GR と同じく 0 から下へ振れる）+ 出力 3 バンド
 //!   * ステータス LED + テキスト、有効 / 無効のトグル
 //!
@@ -147,6 +150,8 @@ const K_FADER_VALUE_H: f32 = 15.0;
 const K_FADER_TRACK_W: f32 = 9.0;
 const K_FADER_HANDLE_W: f32 = 30.0;
 const K_FADER_HANDLE_H: f32 = 14.0;
+/// MUTE / BYP キーの高さ（フェーダーの上に 1 段）。
+const K_FADER_BTN_H: f32 = 15.0;
 
 /// GR メーター（縦・0 から下へ振れるコンプの GR 風）。
 const K_GR_BAR_W: f32 = 20.0;
@@ -751,6 +756,24 @@ fn fader_text(i: usize, v: f32) -> (String, String) {
     }
 }
 
+/// MUTE / BYP を押したときの一時メッセージ（何が起きたかを文章で出す）。
+///
+/// 効果はフェーダーごとに違う（`dsp::FeatureMode` の表のとおり）ので、
+/// 押した直後にここで言葉にして出す。
+fn mode_message(i: usize, m: dsp::FeatureMode) -> String {
+    let name = FADERS[i].name;
+    let body = match (i, m) {
+        (_, dsp::FeatureMode::Active) => "有効（つまみの値）",
+        (0, dsp::FeatureMode::Mute) => "ミュート — 暗騒音を残しません (0 %)",
+        (0, dsp::FeatureMode::Bypass) => "バイパス — 暗騒音をそのまま (100 %)",
+        (1, dsp::FeatureMode::Mute) => "ミュート — presence を最小 (-12 dB)",
+        (1, dsp::FeatureMode::Bypass) => "バイパス — presence を掛けません (0 dB)",
+        (2, dsp::FeatureMode::Mute) => "ミュート — 残響を残しません (0 %)",
+        _ => "バイパス — 残響をそのまま (100 %)",
+    };
+    format!("{name}: {body}")
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct Layout {
     /// タイトル（左）とメモリー（右）を載せる帯。
@@ -763,18 +786,21 @@ struct Layout {
     status: IR,
     button: IR,
 
-    /// セクション見出し（INPUT / CONTROL / EFFECT）を描く帯。
+    /// セクション見出し（IN / OUT / CONTROL / EFFECT）を描く帯。
     section: [IR; 3],
-    /// 入力 VU の盤面（左 = ch0 / 上）と、その右の数値欄。
+    /// VU の盤面（上 = IN = 加工前 / 下 = OUT = 加工後）と、その右の数値窓。
     vu: [IR; 2],
     vu_num: [IR; 2],
-    /// フェーダーの当たり判定（値表示を含む柱）。
+    /// フェーダーの当たり判定（トラックの柱）。MUTE / BYP はこの外にある。
     fader: [IR; 3],
     /// フェーダーのトラック（つまみが動く範囲）。
     fader_track: [IR; 3],
     label: [IR; 3],
     value_db: [IR; 3],
     value_pc: [IR; 3],
+    /// MUTE / BYP キー（フェーダーの上に 1 段）。
+    mute: [IR; 3],
+    byp: [IR; 3],
     /// GR バー本体 / 目盛り / 数値欄。
     gr: IR,
     gr_scale: IR,
@@ -1154,6 +1180,8 @@ struct Snapshot {
     values: [f32; 3],
     /// フェーダーの表示文字列（上段 / 下段）。
     fader_text: [(String, String); 3],
+    /// フェーダーごとのミュート / バイパス。
+    modes: [dsp::FeatureMode; 3],
     status: u32,
     status_text: String,
     summary: String,
@@ -1176,6 +1204,9 @@ struct Snapshot {
     hover_button: bool,
     press_button: bool,
     hover_fader: Option<usize>,
+    /// マウスが乗っているミュート / バイパスキー。
+    hover_mute: Option<usize>,
+    hover_byp: Option<usize>,
 }
 
 struct Panel {
@@ -1216,6 +1247,9 @@ struct Panel {
     hover_button: bool,
     press_button: bool,
     hover_fader: Option<usize>,
+    /// マウスが乗っているミュート / バイパスキー。
+    hover_mute: Option<usize>,
+    hover_byp: Option<usize>,
 
     /// パネルを作った時刻（検証用の画像ダンプの待ち時間に使う）。
     opened_at: Instant,
@@ -1251,6 +1285,8 @@ impl Panel {
             hover_button: false,
             press_button: false,
             hover_fader: None,
+            hover_mute: None,
+            hover_byp: None,
             opened_at: Instant::now(),
             dumped: false,
         }
@@ -1375,6 +1411,7 @@ impl Panel {
             [m.in_level(0), m.in_level(1)],
             [m.in_peak(0), m.in_peak(1)],
             [m.out_level(0), m.out_level(1)],
+            [m.out_peak(0), m.out_peak(1)],
             channels,
         );
 
@@ -1425,6 +1462,21 @@ impl Panel {
             return;
         }
 
+        // ---- フェーダーのミュート / バイパス（つまみの位置は保つ） ----
+        for i in 0..3 {
+            if !self.fader_enabled(i) {
+                continue;
+            }
+            if hit(&self.layout.mute[i], x, y) {
+                self.toggle_mode(i, dsp::FeatureMode::Mute);
+                return;
+            }
+            if hit(&self.layout.byp[i], x, y) {
+                self.toggle_mode(i, dsp::FeatureMode::Bypass);
+                return;
+            }
+        }
+
         // ---- フェーダー ----
         for i in 0..3 {
             if hit(&self.layout.fader[i], x, y) && self.fader_enabled(i) {
@@ -1448,7 +1500,7 @@ impl Panel {
             }
         }
 
-        // 入力メーターのダブルクリックでピークホールドを消す。
+        // メーター（IN / OUT）のダブルクリックでピークホールドを消す。
         for ch in 0..2 {
             if hit(&self.layout.vu[ch], x, y) || hit(&self.layout.vu_num[ch], x, y) {
                 self.meter.reset();
@@ -1494,12 +1546,21 @@ impl Panel {
 
         let hb = hit(&self.layout.button, x, y);
         let hf = (0..3).find(|i| hit(&self.layout.fader[*i], x, y) && self.fader_enabled(*i));
+        let hm = (0..3).find(|i| hit(&self.layout.mute[*i], x, y) && self.fader_enabled(*i));
+        let hy = (0..3).find(|i| hit(&self.layout.byp[*i], x, y) && self.fader_enabled(*i));
         let hs = (0..SLOTS).find(|i| hit(&self.layout.slot[*i], x, y));
         let hv = hit(&self.layout.save_btn, x, y);
-        if hb != self.hover_button || hf != self.hover_fader || hs != self.hover_slot || hv != self.hover_save
+        if hb != self.hover_button
+            || hf != self.hover_fader
+            || hm != self.hover_mute
+            || hy != self.hover_byp
+            || hs != self.hover_slot
+            || hv != self.hover_save
         {
             self.hover_button = hb;
             self.hover_fader = hf;
+            self.hover_mute = hm;
+            self.hover_byp = hy;
             self.hover_slot = hs;
             self.hover_save = hv;
             self.invalidate();
@@ -1552,6 +1613,42 @@ impl Panel {
         i != 2 || self.shared.dereverb.load(Ordering::Relaxed)
     }
 
+    /// フェーダーごとのミュート / バイパス。
+    fn fader_mode(&self, i: usize) -> dsp::FeatureMode {
+        match i {
+            0 => self.shared.params.ambience_mode(),
+            1 => self.shared.params.voice_mode(),
+            _ => self.shared.params.voice_reverb_mode(),
+        }
+    }
+
+    fn set_fader_mode(&self, i: usize, m: dsp::FeatureMode) {
+        match i {
+            0 => self.shared.params.set_ambience_mode(m),
+            1 => self.shared.params.set_voice_mode(m),
+            _ => self.shared.params.set_voice_reverb_mode(m),
+        }
+    }
+
+    /// MUTE / BYP キーを押したときの切り替え。
+    ///
+    /// 同じキーをもう一度押すと有効へ戻る。MUTE と BYP は排他で、片方を
+    /// 押すともう片方は落ちる（3 状態のロータリースイッチのつもり）。
+    /// **つまみの値には触らない。**
+    fn toggle_mode(&mut self, i: usize, m: dsp::FeatureMode) {
+        let next = if self.fader_mode(i) == m {
+            dsp::FeatureMode::Active
+        } else {
+            m
+        };
+        self.set_fader_mode(i, next);
+        // 手で触ったら「呼び出したスロット」の表示は消す。
+        self.current_slot = None;
+        // OBS の設定にも書き戻す（シーンコレクションに残す）。
+        self.push_settings();
+        self.flash_msg(mode_message(i, next));
+    }
+
     fn apply_fader(&mut self, i: usize, v: f32, push: bool) {
         match i {
             0 => self.shared.params.set_ambience(v),
@@ -1602,6 +1699,15 @@ impl Panel {
             crate::ffi::obs_data_set_string(d, dsp::MODEL.as_ptr(), model.as_ptr());
             let vref = std::ffi::CString::new(self.shared.params.vu_ref().as_str()).unwrap_or_default();
             crate::ffi::obs_data_set_string(d, dsp::VU_REF.as_ptr(), vref.as_ptr());
+            // ミュート / バイパス（つまみの値はこの上で書き終えている）。
+            for (key, m) in [
+                (dsp::AMBIENCE_MODE, self.shared.params.ambience_mode()),
+                (dsp::VOICE_MODE, self.shared.params.voice_mode()),
+                (dsp::VOICE_REVERB_MODE, self.shared.params.voice_reverb_mode()),
+            ] {
+                let s = std::ffi::CString::new(m.as_str()).unwrap_or_default();
+                crate::ffi::obs_data_set_string(d, key.as_ptr(), s.as_ptr());
+            }
             crate::ffi::obs_source_update(self.source as *mut _, d);
             crate::ffi::obs_data_release(d);
         }
@@ -1617,6 +1723,9 @@ impl Panel {
             ambience: self.shared.params.ambient(),
             voice_db: self.shared.params.voice(),
             reverb: self.shared.params.voice_reverb(),
+            ambience_mode: self.shared.params.ambience_mode(),
+            voice_mode: self.shared.params.voice_mode(),
+            reverb_mode: self.shared.params.voice_reverb_mode(),
             model: self.shared.params.model().as_str().to_string(),
         }
     }
@@ -1627,6 +1736,9 @@ impl Panel {
         self.shared.params.set_ambience(p.ambience);
         self.shared.params.set_voice(p.voice_db);
         self.shared.params.set_voice_reverb(p.reverb);
+        self.shared.params.set_ambience_mode(p.ambience_mode);
+        self.shared.params.set_voice_mode(p.voice_mode);
+        self.shared.params.set_voice_reverb_mode(p.reverb_mode);
         self.shared.params.set_model(p.model_choice());
         self.push_settings();
         self.invalidate();
@@ -1745,7 +1857,7 @@ impl Panel {
         out.section[1] = control.top(title_h);
         out.section[2] = effect.top(title_h);
 
-        // ---- INPUT: 入力 VU 2 本（L が上 / R が下）+ 数値欄 ----
+        // ---- IN / OUT: VU 2 本（IN が上 / OUT が下）+ 数値窓 ----
         let vu_area = IR { t: input.t + title_h + sc(6.0), ..input };
         let vg = sc(K_VU_GAP);
         let row_h = (vu_area.h() - vg) / 2;
@@ -1757,7 +1869,7 @@ impl Panel {
             out.vu_num[ch] = row.right(num_w);
         }
 
-        // ---- CONTROL: フェーダー 3 本 ----
+        // ---- CONTROL: フェーダー 3 本（+ ミュート / バイパスキー） ----
         let ctrl_area = IR { t: control.t + title_h + sc(4.0), ..control };
         let cw = ctrl_area.w() / 3;
         for i in 0..3usize {
@@ -1778,16 +1890,34 @@ impl Panel {
                 b: out.value_db[i].b + sc(K_FADER_VALUE_H),
                 ..cell
             };
+            // MUTE / BYP のキー（値表示の下、トラックの上に 1 段）。
+            let by = out.value_pc[i].b + sc(2.0);
+            let bh = sc(K_FADER_BTN_H);
+            let bg = sc(2.0);
+            let key_w = ((cell.w() - sc(8.0) - bg) / 2).max(sc(10.0));
+            out.mute[i] = IR {
+                l: cell.l + sc(4.0),
+                t: by,
+                r: cell.l + sc(4.0) + key_w,
+                b: by + bh,
+            };
+            out.byp[i] = IR {
+                l: out.mute[i].r + bg,
+                t: by,
+                r: cell.r - sc(4.0),
+                b: by + bh,
+            };
             // トラック = つまみが動ける範囲（つまみの張り出しを含む）。
             // つまみの中心が動けるのは [t + hh/2, b - hh/2]。
             out.fader_track[i] = IR {
-                t: out.value_pc[i].b + sc(6.0),
+                t: out.byp[i].b + sc(5.0),
                 b: cell.b - sc(2.0),
                 ..cell
             };
-            // 当たり判定は値表示より下の柱ぜんぶ（ミキサーのストリップ風）。
+            // 当たり判定はトラックの柱ぜんぶ（ミキサーのストリップ風）。
+            // キーの高さは含めない（キーを押しただけでフェーダーが飛ばない）。
             out.fader[i] = IR {
-                t: out.value_db[i].b,
+                t: out.fader_track[i].t,
                 ..cell
             };
         }
@@ -1853,6 +1983,11 @@ impl Panel {
                 fader_text(1, self.fader_value(1)),
                 fader_text(2, self.fader_value(2)),
             ],
+            modes: [
+                self.fader_mode(0),
+                self.fader_mode(1),
+                self.fader_mode(2),
+            ],
             status: self.shared.status(),
             status_text: self.shared.status_detail(),
             summary: self.shared.summary(),
@@ -1874,6 +2009,8 @@ impl Panel {
             hover_button: self.hover_button,
             press_button: self.press_button,
             hover_fader: self.hover_fader,
+            hover_mute: self.hover_mute,
+            hover_byp: self.hover_byp,
         }
     }
 
@@ -1984,7 +2121,7 @@ impl Panel {
             paint_memory(dib, dc, fonts, &s, scale);
 
             // ---- セクション見出し ----
-            let sec_names = ["INPUT", "CONTROL", "EFFECT"];
+            let sec_names = ["IN / OUT", "CONTROL", "EFFECT"];
             for i in 0..3usize {
                 let r = lay.section[i];
                 draw_engraved(
@@ -2030,23 +2167,24 @@ impl Panel {
                 DT_RIGHT.0 | DT_VCENTER.0 | DT_SINGLELINE.0,
             );
 
-            // ---- 入力 VU（アナログ針・L / R） ----
-            let n_ch = s.channels.max(1);
-            let vu_names = ["L", "R"];
-            for ch in 0..2usize {
-                let on = ch < n_ch && s.channels > 0;
-                let pos = vu_to_pos(s.reading.vu_lin[ch], s.vref);
-                paint_vu(
-                    dib, dc, fonts, scale, lay.vu[ch], pos, vu_names[ch], on,
-                );
-                paint_meter_num(
-                    dib, dc, fonts, scale, lay.vu_num[ch], s.reading.vu_db[ch], s.reading.peak_db[ch], on,
-                );
+            // ---- VU 2 本（アナログ針・上 = IN = 加工前 / 下 = OUT = 加工後） ----
+            let on = s.channels > 0;
+            let r = s.reading;
+            // (針のリニア値, 現在値 dBFS, ピーク dBFS, 盤面の名前)
+            let meters = [
+                (r.vu_in_lin, r.vu_in_db, r.peak_in_db, "IN"),
+                (r.vu_out_lin, r.vu_out_db, r.peak_out_db, "OUT"),
+            ];
+            for (m, (lin, db, peak, name)) in meters.iter().enumerate() {
+                let pos = vu_to_pos(*lin, s.vref);
+                paint_vu(dib, dc, fonts, scale, lay.vu[m], pos, name, on);
+                paint_meter_num(dib, dc, fonts, scale, lay.vu_num[m], name, *db, *peak, on);
             }
 
-            // ---- フェーダー 3 本 ----
+            // ---- フェーダー 3 本（+ MUTE / BYP キー） ----
             for i in 0..3usize {
                 let on = i != 2 || s.dereverb;
+                let mode = s.modes[i];
                 paint_fader(
                     dib,
                     dc,
@@ -2061,7 +2199,34 @@ impl Panel {
                     &s.fader_text[i].0,
                     &s.fader_text[i].1,
                     on,
+                    // ミュート / バイパス中は値の表示を落として「効いていない」
+                    // ことを見せる（つまみの位置そのものは変わらない）。
+                    on && mode == dsp::FeatureMode::Active,
                     s.hover_fader == Some(i),
+                );
+                paint_switch(
+                    dib,
+                    dc,
+                    fonts,
+                    scale,
+                    lay.mute[i],
+                    "MUTE",
+                    LED_RED,
+                    mode == dsp::FeatureMode::Mute,
+                    on,
+                    s.hover_mute == Some(i),
+                );
+                paint_switch(
+                    dib,
+                    dc,
+                    fonts,
+                    scale,
+                    lay.byp[i],
+                    "BYP",
+                    WARM,
+                    mode == dsp::FeatureMode::Bypass,
+                    on,
+                    s.hover_byp == Some(i),
                 );
             }
 
@@ -2216,6 +2381,68 @@ fn paint_key(
             DT_CENTER.0 | DT_VCENTER.0 | DT_SINGLELINE.0,
         );
     }
+}
+
+/// フェーダーの MUTE / BYP キー（小さいトグル）。
+///
+/// 左端の細い窓が LED（点灯 = その状態が有効）、右に文字。`enabled` が false
+/// のときは押せないので全体を沈める（REVERB が 1 出力モデルのとき）。
+#[allow(clippy::too_many_arguments)]
+unsafe fn paint_switch(
+    dib: &mut Dib,
+    dc: HDC,
+    fonts: &Fonts,
+    scale: f32,
+    r: IR,
+    label: &str,
+    led: u32,
+    lit: bool,
+    enabled: bool,
+    hover: bool,
+) {
+    let sc = |v: f32| (v * scale).round() as i32;
+    let rad = sc(2.0);
+
+    let (top, bot) = if !enabled {
+        (0x1b1e21, 0x141618)
+    } else if lit {
+        (0x2b3034, 0x1d2124)
+    } else if hover {
+        (0x30353a, 0x22262a)
+    } else {
+        (0x25292d, 0x1a1d20)
+    };
+    dib.fill_round_rect_vgrad(r, rad, top, bot);
+    dib.bevel(r, lerp_rgb(top, BEVEL_HI, 0.5), BEVEL_LO);
+
+    // LED（左端の縦長の窓）。消灯中は黒い穴のまま。
+    let lamp = IR {
+        l: r.l + sc(3.0),
+        t: r.t + sc(3.0),
+        r: r.l + sc(3.0) + sc(3.0).max(2),
+        b: r.b - sc(3.0),
+    };
+    dib.fill_rect(lamp, 0x0b0d0f);
+    if lit && enabled {
+        dib.fill_rect(lamp.inset(1), led);
+        dib.fill_rect(IR { t: lamp.t + 1, ..lamp.inset(1) }, lighten(led, 0.4));
+    }
+
+    draw_engraved(
+        dc,
+        label,
+        IR { l: lamp.r, r: r.r - sc(2.0), ..r },
+        fonts.silk_small,
+        if !enabled {
+            SILK_FAINT
+        } else if lit {
+            VALUE
+        } else {
+            SILK_DIM
+        },
+        scale,
+        DT_CENTER.0 | DT_VCENTER.0 | DT_SINGLELINE.0,
+    );
 }
 
 /// 小さいキー（メモリーのスロット）。
@@ -2554,13 +2781,14 @@ unsafe fn paint_vu(
     dib.bevel(r.inset(sc(2.0)), 0x9aa0a5, 0x14161a);
 }
 
-/// VU の数値欄（現在値 dBFS + ピーク dBFS）。凹んだ表示窓。
+/// VU の数値窓（名前 + 現在値 dBFS + ピーク dBFS）。凹んだ表示窓。
 fn paint_meter_num(
     dib: &mut Dib,
     dc: HDC,
     fonts: &Fonts,
     scale: f32,
     r: IR,
+    name: &str,
     db: f32,
     peak_db: f32,
     on: bool,
@@ -2580,10 +2808,19 @@ fn paint_meter_num(
     };
 
     unsafe {
+        // 名前（IN / OUT）。
+        draw_text(
+            dc,
+            name,
+            IR { l: r.l, t: r.t + sc(2.0), r: r.r, b: r.t + sc(13.0) },
+            fonts.silk_small,
+            if on { SILK_DIM } else { SILK_FAINT },
+            DT_CENTER.0 | DT_VCENTER.0 | DT_SINGLELINE.0,
+        );
         draw_text(
             dc,
             &db_text(db),
-            IR { l: r.l, t: r.t + sc(6.0), r: r.r, b: mid - sc(2.0) },
+            IR { l: r.l, t: r.t + sc(13.0), r: r.r, b: mid - sc(2.0) },
             fonts.digital,
             c_now,
             DT_CENTER.0 | DT_VCENTER.0 | DT_SINGLELINE.0,
@@ -2618,6 +2855,9 @@ fn paint_meter_num(
 }
 
 /// 縦フェーダー 1 本（目盛り + トラック + つまみ + dB / % の併記）。
+///
+/// `value_lit` は値表示を点けるか。ミュート / バイパス中はここだけ落とす
+/// （つまみの位置そのものは変わらないので、柱とつまみは通常のまま）。
 #[allow(clippy::too_many_arguments)]
 unsafe fn paint_fader(
     dib: &mut Dib,
@@ -2633,6 +2873,7 @@ unsafe fn paint_fader(
     db_text_s: &str,
     pc_text_s: &str,
     on: bool,
+    value_lit: bool,
     hover: bool,
 ) {
     let sc = |v: f32| (v * scale).round() as i32;
@@ -2661,7 +2902,7 @@ unsafe fn paint_fader(
         up,
         db_r,
         fonts.digital_small,
-        if on { VALUE } else { dim(VALUE, 0.4) },
+        if value_lit { VALUE } else { dim(VALUE, 0.45) },
         DT_CENTER.0 | DT_VCENTER.0 | DT_SINGLELINE.0,
     );
     draw_text(
@@ -2669,7 +2910,7 @@ unsafe fn paint_fader(
         low,
         pc_r,
         fonts.silk_small,
-        if on { SILK_DIM } else { SILK_FAINT },
+        if value_lit { SILK_DIM } else { SILK_FAINT },
         DT_CENTER.0 | DT_VCENTER.0 | DT_SINGLELINE.0,
     );
 
@@ -3157,9 +3398,12 @@ mod tests {
 
     fn fill_demo(p: &mut Panel) {
         p.reading = Reading {
-            vu_lin: [lin(-20.5), lin(-26.0)],
-            vu_db: [-20.5, -26.0],
-            peak_db: [-17.8, -23.4],
+            vu_in_lin: lin(-20.5),
+            vu_in_db: -20.5,
+            vu_out_lin: lin(-32.5),
+            vu_out_db: -32.5,
+            peak_in_db: -17.8,
+            peak_out_db: -29.4,
             gr_db: 11.6,
         };
         p.bands_display = [0.72, 0.45, 0.28];
@@ -3175,19 +3419,24 @@ mod tests {
             ambience: 0.62,
             voice_db: 3.5,
             reverb: 0.28,
+            ambience_mode: dsp::FeatureMode::Mute,
             model: "dp8".into(),
+            ..Default::default()
         });
         slots[2] = Some(Preset {
             ambience: 0.85,
             voice_db: 0.0,
             reverb: 0.0,
             model: "dp2".into(),
+            ..Default::default()
         });
         slots[6] = Some(Preset {
             ambience: 0.30,
             voice_db: 6.0,
             reverb: 0.6,
+            voice_mode: dsp::FeatureMode::Bypass,
             model: "auto".into(),
+            ..Default::default()
         });
         p.slots = slots;
         p.current_slot = Some(2);
@@ -3232,11 +3481,19 @@ mod tests {
         p.save_armed = true;
         p.hover_slot = Some(4);
         p.hover_button = true;
-        // モノラルなので R の針は静止位置。
-        p.reading.vu_lin[1] = 0.0;
-        p.reading.vu_db[1] = meter::DB_FLOOR;
-        p.reading.peak_db[1] = meter::DB_FLOOR;
         render(&mut p, "panel-mono-save");
+    }
+
+    /// MUTE / BYP が灯った状態（AMBIENCE をミュート、VOICE をバイパス）。
+    #[test]
+    fn snapshot_panel_modes() {
+        let mut p = setup(1.0);
+        fill_demo(&mut p);
+        p.shared.params.set_ambience_mode(dsp::FeatureMode::Mute);
+        p.shared.params.set_voice_mode(dsp::FeatureMode::Bypass);
+        p.hover_mute = Some(2);
+        p.flash = Some(("VOICE: バイパス — presence を掛けません (0 dB)".into(), Instant::now()));
+        render(&mut p, "panel-modes");
     }
 
     #[test]
@@ -3272,6 +3529,8 @@ mod tests {
                 .chain(l.label)
                 .chain(l.value_db)
                 .chain(l.value_pc)
+                .chain(l.mute)
+                .chain(l.byp)
                 .chain([l.bands_label])
             {
                 assert!(r.l >= 0 && r.t >= 0 && r.r <= w && r.b <= h, "はみ出し: {r:?} ({w}x{h})");
@@ -3290,6 +3549,50 @@ mod tests {
         assert_eq!(fader_text(1, 12.0).1, "100 %");
         assert_eq!(fader_text(2, 1.0).0, "100 %");
         assert_eq!(fader_text(2, 0.0).1, "-∞ dB");
+    }
+
+    #[test]
+    fn mode_messages_name_the_effect() {
+        assert_eq!(
+            mode_message(0, dsp::FeatureMode::Active),
+            "AMBIENCE: 有効（つまみの値）"
+        );
+        // フェーダーごとに効きが違うので、押した直後の文章も違うこと。
+        assert!(mode_message(0, dsp::FeatureMode::Mute).contains("暗騒音を残しません"));
+        assert!(mode_message(0, dsp::FeatureMode::Bypass).contains("100 %"));
+        assert!(mode_message(1, dsp::FeatureMode::Mute).contains("-12 dB"));
+        assert!(mode_message(1, dsp::FeatureMode::Bypass).contains("0 dB"));
+        assert!(mode_message(2, dsp::FeatureMode::Mute).contains("残響を残しません"));
+        assert!(mode_message(2, dsp::FeatureMode::Bypass).contains("100 %"));
+    }
+
+    /// MUTE / BYP は排他で、同じキーをもう一度押すと有効に戻る。
+    /// **つまみの値には触らない。**
+    #[test]
+    fn toggle_mode_is_exclusive_and_keeps_the_fader() {
+        let mut p = setup(1.0);
+        p.shared.params.set_ambience(0.62);
+
+        p.toggle_mode(0, dsp::FeatureMode::Mute);
+        assert_eq!(p.fader_mode(0), dsp::FeatureMode::Mute);
+        assert!((p.fader_value(0) - 0.62).abs() < 1e-6, "つまみが動いた");
+
+        // BYP を押すと MUTE は落ちる。
+        p.toggle_mode(0, dsp::FeatureMode::Bypass);
+        assert_eq!(p.fader_mode(0), dsp::FeatureMode::Bypass);
+
+        // 同じキーをもう一度で有効へ。
+        p.toggle_mode(0, dsp::FeatureMode::Bypass);
+        assert_eq!(p.fader_mode(0), dsp::FeatureMode::Active);
+        assert!((p.fader_value(0) - 0.62).abs() < 1e-6, "つまみが動いた");
+    }
+
+    /// REVERB のキーは 1 出力モデル（dereverb なし）では押せない。
+    #[test]
+    fn reverb_keys_are_disabled_without_dereverb() {
+        let p = setup(1.0);
+        assert!(!p.fader_enabled(2), "dereverb なしで REVERB が有効");
+        assert!(p.fader_enabled(0) && p.fader_enabled(1));
     }
 
     #[test]

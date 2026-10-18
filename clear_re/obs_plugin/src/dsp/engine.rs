@@ -30,6 +30,10 @@ pub struct ParamSnapshot {
     pub ambience: f32,
     pub voice_db: f32,
     pub voice_reverb: f32,
+    /// フェーダーごとのミュート / バイパス（つまみの値は上書きしない）。
+    pub ambience_mode: params::FeatureMode,
+    pub voice_mode: params::FeatureMode,
+    pub voice_reverb_mode: params::FeatureMode,
 }
 
 impl Default for ParamSnapshot {
@@ -38,6 +42,9 @@ impl Default for ParamSnapshot {
             ambience: params::AMBIENCE_DEFAULT as f32,
             voice_db: params::VOICE_DEFAULT as f32,
             voice_reverb: params::VOICE_REVERB_DEFAULT as f32,
+            ambience_mode: params::FeatureMode::default(),
+            voice_mode: params::FeatureMode::default(),
+            voice_reverb_mode: params::FeatureMode::default(),
         }
     }
 }
@@ -54,6 +61,8 @@ pub struct Meters {
     in_peak: [AtomicU32; 2],
     /// 出力（加工後）の RMS [ch]。GR メーター用。
     out_rms: [AtomicU32; 2],
+    /// 出力（加工後）のピーク [ch]。パネルのピークホールド表示用。
+    out_peak: [AtomicU32; 2],
     /// 出力の 3 バンド（低 / 中 / 高）RMS [ch][band]。
     levels: [[AtomicU32; 3]; 2],
     /// 音声ブロックを処理するたびに増える通し番号。
@@ -69,6 +78,7 @@ impl Meters {
             in_rms: [AtomicU32::new(0), AtomicU32::new(0)],
             in_peak: [AtomicU32::new(0), AtomicU32::new(0)],
             out_rms: [AtomicU32::new(0), AtomicU32::new(0)],
+            out_peak: [AtomicU32::new(0), AtomicU32::new(0)],
             levels: [
                 [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)],
                 [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)],
@@ -102,6 +112,12 @@ impl Meters {
         f32::from_bits(self.out_rms[ch.min(1)].load(Ordering::Relaxed))
     }
 
+    /// 出力（加工後）ピーク [ch]。
+    #[inline]
+    pub fn out_peak(&self, ch: usize) -> f32 {
+        f32::from_bits(self.out_peak[ch.min(1)].load(Ordering::Relaxed))
+    }
+
     /// 処理した音声ブロックの通し番号。
     #[inline]
     pub fn seq(&self) -> u64 {
@@ -133,6 +149,11 @@ impl Meters {
     #[inline]
     pub(crate) fn set_out(&self, ch: usize, v: f32) {
         self.out_rms[ch.min(1)].store(v.to_bits(), Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub(crate) fn set_out_peak(&self, ch: usize, v: f32) {
+        self.out_peak[ch.min(1)].store(v.to_bits(), Ordering::Relaxed);
     }
 }
 
@@ -350,6 +371,8 @@ pub struct Engine {
     meter_in_smoothed: [f32; 2],
     /// 入力ピーク（ブロック内最大 + 短い戻り）。パネルのピークホールド用。
     meter_in_peak: [f32; 2],
+    /// 出力ピーク（入力と同じ扱い）。OUT のピークホールド用。
+    meter_out_peak: [f32; 2],
     /// 出力 RMS の平滑値（GR = 入力 - 出力 の材料）。
     meter_out_smoothed: [f32; 2],
 
@@ -442,6 +465,7 @@ pub fn build(
         meter_band_smoothed: [[0.0; 3]; 2],
         meter_in_smoothed: [0.0; 2],
         meter_in_peak: [0.0; 2],
+        meter_out_peak: [0.0; 2],
         meter_out_smoothed: [0.0; 2],
         meters,
         num_channels,
@@ -500,6 +524,7 @@ impl Engine {
         self.meter_band_smoothed = [[0.0; 3]; 2];
         self.meter_in_smoothed = [0.0; 2];
         self.meter_in_peak = [0.0; 2];
+        self.meter_out_peak = [0.0; 2];
         self.meter_out_smoothed = [0.0; 2];
 
         if let Some(r) = self.rack.as_mut() {
@@ -632,13 +657,28 @@ impl Engine {
 
     fn run_hop(&mut self, p: ParamSnapshot) {
         // ---- パラメータの平滑化（1 ホップ = 10 ms ごと） ----
+        // ミュート / バイパスは平滑化の**前**に効かせる。こうすれば切り替えた
+        // ときも、つまみを回したときと同じ速さで滑らかに動く（クリックしない）。
+        let ambience = p.ambience_mode.apply(
+            p.ambience.clamp(0.0, 1.0),
+            params::AMBIENCE_MIN as f32,
+            params::AMBIENCE_NEUTRAL,
+        );
+        let reverb = p.voice_reverb_mode.apply(
+            p.voice_reverb.clamp(0.0, 1.0),
+            params::VOICE_REVERB_MIN as f32,
+            params::VOICE_REVERB_NEUTRAL,
+        );
+        let voice_db = p
+            .voice_mode
+            .apply(p.voice_db, params::VOICE_MIN as f32, params::VOICE_NEUTRAL);
+
         let target_weight =
-            params::attenuation_to_noisy_weight(params::ambience_to_attenuation_db(p.ambience));
+            params::attenuation_to_noisy_weight(params::ambience_to_attenuation_db(ambience));
         let k = params::SMOOTHING_K;
         self.smoothed_noisy_weight += k * (target_weight - self.smoothed_noisy_weight);
-        self.smoothed_reverb_blend +=
-            k * (p.voice_reverb.clamp(0.0, 1.0) - self.smoothed_reverb_blend);
-        self.voice_gain = params::decibels_to_gain(p.voice_db);
+        self.smoothed_reverb_blend += k * (reverb - self.smoothed_reverb_blend);
+        self.voice_gain = params::decibels_to_gain(voice_db);
 
         let alpha = self.smoothed_noisy_weight;
         let beta = self.smoothed_reverb_blend;
@@ -749,6 +789,7 @@ impl Engine {
 
             let mut sum = [0.0f64; 3];
             let mut sum_out = 0.0f64;
+            let mut abs_out = 0.0f32;
 
             for &x in p {
                 s_a += inv_a * (x - s_a);
@@ -762,6 +803,7 @@ impl Engine {
                 sum[1] += (mid as f64) * (mid as f64);
                 sum[2] += (high as f64) * (high as f64);
                 sum_out += (x as f64) * (x as f64);
+                abs_out = abs_out.max(x.abs());
             }
 
             self.meter_lp_a[ch] = s_a;
@@ -772,6 +814,11 @@ impl Engine {
             let sm_out = &mut self.meter_out_smoothed[ch];
             *sm_out = out_rms.max(*sm_out * LEVEL_DECAY);
             self.meters.set_out(ch, *sm_out);
+
+            // 出力ピーク（OUT のピークホールド表示用）。入力と同じ戻り。
+            let pk_out = &mut self.meter_out_peak[ch];
+            *pk_out = abs_out.max(*pk_out * PEAK_DECAY);
+            self.meters.set_out_peak(ch, *pk_out);
 
             for b in 0..3 {
                 let rms = (sum[b] / frames as f64).sqrt() as f32;

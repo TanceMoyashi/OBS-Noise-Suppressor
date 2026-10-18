@@ -78,6 +78,11 @@ pub struct Params {
     ambience: AtomicU32,
     voice: AtomicU32,
     voice_reverb: AtomicU32,
+    /// フェーダーごとのミュート / バイパス（`dsp::FeatureMode::code()`）。
+    /// つまみの値（上の 3 つ）は上書きしない。
+    ambience_mode: AtomicU8,
+    voice_mode: AtomicU8,
+    voice_reverb_mode: AtomicU8,
     /// 使うモデル（`paths::ModelChoice::code()`）。エンジンを組み直すかの判定にも使う。
     model: AtomicU8,
     /// VU メーターの基準（`dsp::VuRef::code()` = dBFS）。表示にだけ効く。
@@ -90,6 +95,9 @@ impl Params {
             ambience: AtomicU32::new((dsp::AMBIENCE_DEFAULT as f32).to_bits()),
             voice: AtomicU32::new((dsp::VOICE_DEFAULT as f32).to_bits()),
             voice_reverb: AtomicU32::new((dsp::VOICE_REVERB_DEFAULT as f32).to_bits()),
+            ambience_mode: AtomicU8::new(dsp::FeatureMode::default().code()),
+            voice_mode: AtomicU8::new(dsp::FeatureMode::default().code()),
+            voice_reverb_mode: AtomicU8::new(dsp::FeatureMode::default().code()),
             model: AtomicU8::new(paths::ModelChoice::default().code()),
             vu_ref: AtomicU8::new(dsp::VuRef::default().code()),
         }
@@ -100,6 +108,9 @@ impl Params {
             ambience: f32::from_bits(self.ambience.load(Ordering::Relaxed)),
             voice_db: f32::from_bits(self.voice.load(Ordering::Relaxed)),
             voice_reverb: f32::from_bits(self.voice_reverb.load(Ordering::Relaxed)),
+            ambience_mode: self.ambience_mode(),
+            voice_mode: self.voice_mode(),
+            voice_reverb_mode: self.voice_reverb_mode(),
         }
     }
 
@@ -113,6 +124,17 @@ impl Params {
         f32::from_bits(self.voice_reverb.load(Ordering::Relaxed))
     }
 
+    /// フェーダーごとのミュート / バイパス。
+    pub fn ambience_mode(&self) -> dsp::FeatureMode {
+        dsp::FeatureMode::from_code(self.ambience_mode.load(Ordering::Relaxed))
+    }
+    pub fn voice_mode(&self) -> dsp::FeatureMode {
+        dsp::FeatureMode::from_code(self.voice_mode.load(Ordering::Relaxed))
+    }
+    pub fn voice_reverb_mode(&self) -> dsp::FeatureMode {
+        dsp::FeatureMode::from_code(self.voice_reverb_mode.load(Ordering::Relaxed))
+    }
+
     pub fn set_ambience(&self, v: f32) {
         self.ambience.store(v.to_bits(), Ordering::Relaxed);
     }
@@ -121,6 +143,16 @@ impl Params {
     }
     pub fn set_voice_reverb(&self, v: f32) {
         self.voice_reverb.store(v.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn set_ambience_mode(&self, m: dsp::FeatureMode) {
+        self.ambience_mode.store(m.code(), Ordering::Relaxed);
+    }
+    pub fn set_voice_mode(&self, m: dsp::FeatureMode) {
+        self.voice_mode.store(m.code(), Ordering::Relaxed);
+    }
+    pub fn set_voice_reverb_mode(&self, m: dsp::FeatureMode) {
+        self.voice_reverb_mode.store(m.code(), Ordering::Relaxed);
     }
 
     /// 使うモデル。
@@ -167,6 +199,24 @@ impl Params {
             if !vr.is_null() {
                 let s = CStr::from_ptr(vr).to_string_lossy();
                 self.set_vu_ref(dsp::VuRef::from_setting(&s));
+            }
+
+            // フェーダーのミュート / バイパス。文字列なので、キーが無ければ
+            // 空文字 → 既定（有効）に落ちる。
+            let am = crate::ffi::obs_data_get_string(settings, dsp::AMBIENCE_MODE.as_ptr());
+            if !am.is_null() {
+                let s = CStr::from_ptr(am).to_string_lossy();
+                self.set_ambience_mode(dsp::FeatureMode::from_setting(&s));
+            }
+            let vm = crate::ffi::obs_data_get_string(settings, dsp::VOICE_MODE.as_ptr());
+            if !vm.is_null() {
+                let s = CStr::from_ptr(vm).to_string_lossy();
+                self.set_voice_mode(dsp::FeatureMode::from_setting(&s));
+            }
+            let rm = crate::ffi::obs_data_get_string(settings, dsp::VOICE_REVERB_MODE.as_ptr());
+            if !rm.is_null() {
+                let s = CStr::from_ptr(rm).to_string_lossy();
+                self.set_voice_reverb_mode(dsp::FeatureMode::from_setting(&s));
             }
         }
     }
@@ -629,6 +679,13 @@ pub unsafe extern "C" fn get_defaults(settings: *mut crate::ffi::obs_data_t) {
             dsp::VU_REF.as_ptr(),
             dsp::VU_REF_DEFAULT.as_ptr(),
         );
+        for key in [dsp::AMBIENCE_MODE, dsp::VOICE_MODE, dsp::VOICE_REVERB_MODE] {
+            crate::ffi::obs_data_set_default_string(
+                settings,
+                key.as_ptr(),
+                dsp::FEATURE_MODE_DEFAULT.as_ptr(),
+            );
+        }
     })
 }
 
@@ -647,10 +704,13 @@ pub unsafe extern "C" fn update(data: *mut c_void, settings: *mut crate::ffi::ob
         fd.activate_engine();
         obs_log!(
             crate::ffi::LOG_DEBUG,
-            "settings updated (ambience {:.2}, voice {:.2} dB, reverb {:.2})",
+            "settings updated (ambience {:.2} [{}], voice {:.2} dB [{}], reverb {:.2} [{}])",
             fd.shared.params.ambient(),
+            fd.shared.params.ambience_mode().as_str(),
             fd.shared.params.voice(),
-            fd.shared.params.voice_reverb()
+            fd.shared.params.voice_mode().as_str(),
+            fd.shared.params.voice_reverb(),
+            fd.shared.params.voice_reverb_mode().as_str()
         );
     })
 }
@@ -708,6 +768,24 @@ pub unsafe extern "C" fn get_properties(
         let status_c = std::ffi::CString::new(status).unwrap_or_default();
         crate::ffi::obs_property_set_long_description(info, status_c.as_ptr());
 
+        // フェーダーごとのミュート / バイパス（パネルのキーと同じ設定）。
+        // つまみの値はそのままで、効きだけを差し替える。
+        let add_mode_list = |key: &CStr, title: &CStr, desc: &CStr| {
+            let list = crate::ffi::obs_properties_add_list(
+                props,
+                key.as_ptr(),
+                title.as_ptr(),
+                crate::ffi::OBS_COMBO_TYPE_LIST,
+                crate::ffi::OBS_COMBO_FORMAT_STRING,
+            );
+            for m in dsp::FeatureMode::ALL {
+                let v = std::ffi::CString::new(m.as_str()).unwrap_or_default();
+                let l = std::ffi::CString::new(m.label()).unwrap_or_default();
+                crate::ffi::obs_property_list_add_string(list, l.as_ptr(), v.as_ptr());
+            }
+            crate::ffi::obs_property_set_long_description(list, desc.as_ptr());
+        };
+
         let amb = crate::ffi::obs_properties_add_float_slider(
             props,
             dsp::AMBIENCE.as_ptr(),
@@ -719,6 +797,11 @@ pub unsafe extern "C" fn get_properties(
         crate::ffi::obs_property_set_description(
             amb,
             c"残す暗騒音。0 % = 最大抑圧 (-48 dB)、100 % = 最小抑圧 (-6 dB)".as_ptr(),
+        );
+        add_mode_list(
+            dsp::AMBIENCE_MODE,
+            c"Ambience の扱い",
+            c"ミュート = 0 %（暗騒音を残さない）/ バイパス = 100 %（そのまま）。つまみの位置は変わりません。",
         );
 
         let voice = crate::ffi::obs_properties_add_float_slider(
@@ -734,6 +817,11 @@ pub unsafe extern "C" fn get_properties(
             voice,
             c"声の presence。0 dB で完全なパススルー".as_ptr(),
         );
+        add_mode_list(
+            dsp::VOICE_MODE,
+            c"Voice の扱い",
+            c"ミュート = -12 dB（presence を最小）/ バイパス = 0 dB（掛けない）。つまみの位置は変わりません。",
+        );
 
         let rev = crate::ffi::obs_properties_add_float_slider(
             props,
@@ -746,6 +834,11 @@ pub unsafe extern "C" fn get_properties(
         crate::ffi::obs_property_set_description(
             rev,
             c"残す残響（モデルが 2 出力のときのみ有効）".as_ptr(),
+        );
+        add_mode_list(
+            dsp::VOICE_REVERB_MODE,
+            c"Voice Reverb の扱い",
+            c"ミュート = 0 %（残響を残さない）/ バイパス = 100 %（そのまま）。つまみの位置は変わりません。",
         );
 
         // ---- モデル（ドロップダウン） ----
