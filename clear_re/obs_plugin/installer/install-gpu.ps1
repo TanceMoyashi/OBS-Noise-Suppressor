@@ -29,12 +29,19 @@
     なります。CPU 使用率は下がるので、CPU が他の作業で埋まっているときの
     逃げ道として用意してあります。
 
+    コピーできないとき (本体を「管理者として実行」で入れたときなど) は、本体の
+    install.ps1 と同じく、UAC で自分自身を管理者として起動し直します
+    (-NoElevate で抑止)。
+
 .PARAMETER Obs
     ポータブル版などの OBS ルート。<Obs>\data\obs-plugins\obs_noise_suppressor\
     に入れます。
 
 .PARAMETER Dest
     入れ先 (data フォルダ) を直接指定する。
+
+.PARAMETER NoElevate
+    管理者としての起動し直しをしない。
 
 .EXAMPLE
     .\install-gpu.ps1
@@ -43,7 +50,8 @@
 [CmdletBinding()]
 param(
     [string]$Obs = "",
-    [string]$Dest = ""
+    [string]$Dest = "",
+    [switch]$NoElevate
 )
 
 $ErrorActionPreference = "Stop"
@@ -55,6 +63,28 @@ function Fail([string]$Message) {
     Write-Host ""
     Write-Host "[エラー] $Message" -ForegroundColor Red
     exit 1
+}
+
+function Test-IsAdmin {
+    return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+# 自分自身を管理者として起動し直す。UAC が「通知しない」設定なら無言で昇格する。
+function Invoke-ElevatedSelf {
+    $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ('"{0}"' -f $PSCommandPath))
+    if ($Obs) { $argList += @("-Obs", ('"{0}"' -f $Obs)) }
+    if ($Dest) { $argList += @("-Dest", ('"{0}"' -f $Dest)) }
+    Write-Host ("   powershell.exe " + ($argList -join " ")) -ForegroundColor DarkGray
+    try {
+        $p = Start-Process -FilePath "powershell.exe" -ArgumentList $argList `
+            -Verb RunAs -Wait -PassThru
+        return $p.ExitCode
+    } catch {
+        Write-Host "昇格できませんでした: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  このスクリプトを右クリック → 「管理者として実行」してください。"
+        return 1
+    }
 }
 
 foreach ($n in $names) {
@@ -91,6 +121,12 @@ try {
         Write-Host "   [OK] $n" -ForegroundColor Green
     }
 } catch {
+    if (-not $NoElevate -and -not (Test-IsAdmin)) {
+        Write-Host ""
+        Write-Host "[!] コピーできませんでした: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "    管理者として実行し直します..." -ForegroundColor Yellow
+        exit (Invoke-ElevatedSelf)
+    }
     Fail ("コピーできませんでした: $($_.Exception.Message)`n" +
         "OBS を終了してから、もう一度実行してください。本体を「管理者として実行」で`n" +
         "入れた場合は、このスクリプトも管理者として実行してください。")
