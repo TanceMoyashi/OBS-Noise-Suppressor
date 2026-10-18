@@ -372,8 +372,10 @@ OBS のレートを変えて回すときはハーネスに `-SampleRate` を渡�
 - ビルドした DLL: 1,630,720 bytes / SHA256
   `128097cfbaf0edb5c932d3bf026d32eb3535f3eb7cbed9224ed453e61252d616`
   （配布 ZIP 内・インストール済みとバイト一致）
-- 配布 ZIP: `OBS-Noise-Suppressor-0.3.0-win64.zip`（53,429,804 bytes、SHA256
-  `c8657ef722149e463d90e4e825942f9172e516b3f941c4d8b986ca850b81efb3`）
+- 配布 ZIP: `OBS-Noise-Suppressor-0.3.0-win64.zip`（53,429,737 bytes、SHA256
+  `2e3c58c9280733523b98dcdfa0ced7d99cab32dce2b6dfbd25183847548d2d59`）
+  - 初版の資産から **LICENSE だけ差し替えた再パッケージ**（DLL は `128097cf…` のまま不変）。
+    理由は「ライセンス表示（GitHub の判定）」の節を参照
 - **ハマりどころ（実際に起きた）**: `build.ps1 -Tests` はテスト用の lib しか作らず、
   cdylib（配布 DLL）を作り直さない。バージョンを上げたあとに `make_package.ps1
   -SkipBuild` を回すと、**古いバージョン文字列のままの DLL を梱包**してしまう
@@ -381,3 +383,19 @@ OBS のレートを変えて回すときはハーネスに `-SampleRate` を渡�
   が梱包した DLL に `Cargo.toml` のバージョン文字列が入っているか検査し、
   無ければ例外で止める。バージョンを上げたら必ず `build.ps1 -Configuration Release`
   （または `install.ps1`）で cdylib を作り直すこと。
+
+## 7. ライセンス表示（GitHub の判定）
+
+GitHub は `LICENSE` を **licensee** で判定する。しきい値は「正規テキストとの語彙一致
+**98% 以上**」（`CONFIDENCE_THRESHOLD = 98`）で、さらに正規化後の**長さの差 4 文字ごとに
+分母が 1 増える**ペナルティが付く。実際、自作の前書き（`OBS Noise Suppressor` /
+`Copyright (C) …` / or later の注意書き）を冒頭に置いていたときは一致率 **86.6%** まで
+落ちて `NOASSERTION`（Other）になっていた（licensee の式を Python で再現して確認）。
+
+- 対策: `LICENSE` は GPL-2.0 の**正規テキストだけ**にする（choosealicense 版とバイト同一）。
+  これで一致率 100% になり `GPL-2.0` と判定される。
+- 著作権表示と `GPL-2.0-or-later` は README / 配布 `README.txt` 側に書く。
+- `COPYING` に正規の全文を置いても効かない（判定は `LICENSE` を見て、`COPYING` には
+  降りない。GitHub の `GET /repos/{owner}/{repo}/license` が `LICENSE` を返すことで確認）。
+- 本文を正規テキストから変えると 98% を割ることがある（例: FSF の住所行を
+  `<https://fsf.org/>` に戻すだけで 98.2% まで下がる）。`LICENSE` は触らない方がよい。
