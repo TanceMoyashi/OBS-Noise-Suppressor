@@ -458,6 +458,11 @@ pub struct Engine {
     pub num_channels: usize,
     pub dereverb_available: bool,
     pub latency_samples: usize,
+    /// 1 ホップの予算 [us]（= ホップぶんの実時間。48 kHz なら 480 = 10000 us）。
+    /// 起動時キャリブレーションと負荷監視が同じ値を使う。
+    pub budget_us: u64,
+    /// ホストが要求したサンプルレート（`build` に渡された値）。
+    pub rate: u32,
     /// 実際に使った推論デバイス（`Gpu` 指定で失敗したときは `Cpu` になる）。
     pub device: DeviceChoice,
     pub model_summary: String,
@@ -535,7 +540,8 @@ pub fn build(
     }
 
     // リアルタイム余裕の診断: 予算 = 1 ホップぶんの実時間（480 @48k = 10 ms）。
-    meters.set_dsp_budget_us((hop as u64 * 1_000_000 / INTERNAL_SAMPLE_RATE as u64).max(1) as u32);
+    let budget_us = (hop as u64 * 1_000_000 / INTERNAL_SAMPLE_RATE as u64).max(1);
+    meters.set_dsp_budget_us(budget_us as u32);
 
     let mut chans: Vec<Channel> = Vec::with_capacity(num_channels);
     for engine in channels {
@@ -582,6 +588,8 @@ pub fn build(
         num_channels,
         dereverb_available,
         latency_samples: K_LATENCY_HOPS * hop,
+        budget_us,
+        rate,
         device: device_used,
         rack,
         added_latency_ms,
@@ -600,10 +608,52 @@ pub fn build(
 }
 
 impl Engine {
-    /// テスト用（オフライン参照の hop 数を取り出す）。
-    #[cfg(test)]
-    pub fn hop(&self) -> usize {
+    /// 1 ホップのサンプル数（モデルの hop。48 kHz 基準）。
+    ///
+    /// 予算（`budget_us`）と遅延（`latency_samples`）はこの値から決まる。
+    pub fn hop_samples(&self) -> usize {
         self.hop
+    }
+
+    /// 「このマシンで回るか」を実測する: `hops` ホップを空回しした 1 ホップ平均 [us]。
+    ///
+    /// 入力は無音で、出力は捨てる。最初のホップは ONNX Runtime の初回実行
+    /// （グラフ初期化・メモリ確保）で跳ねるので `warmup` ホップぶんは捨てる。
+    /// 終わったら `reset()` するので、続けて実音を流して構わない。
+    /// **音声スレッドでは呼ばない**（数百 ms かかる）。
+    ///
+    /// レート変換があるときは「1 ホップ相当のホスト側サンプル数」を流すので、
+    /// 変換のコストも含めた値になる（48 kHz ではちょうど hop サンプル）。
+    pub fn measure_hop_us(&mut self, warmup: usize, hops: usize) -> u64 {
+        if self.hop == 0 || hops == 0 || self.channels.is_empty() {
+            return 0;
+        }
+
+        // 1 ホップ相当の入力サンプル数。48 kHz なら hop、96 kHz なら 2 * hop。
+        let frames =
+            ((self.hop as u64 * self.rate as u64) / INTERNAL_SAMPLE_RATE as u64).max(1) as usize;
+        let ch = self.num_channels.min(self.channels.len());
+
+        let mut bufs: Vec<Vec<f32>> = (0..ch).map(|_| vec![0.0f32; frames]).collect();
+        let ptrs: Vec<*mut f32> = bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
+        let params = ParamSnapshot::default();
+
+        for _ in 0..warmup {
+            self.process(&ptrs, frames, params);
+            for b in bufs.iter_mut() {
+                b.iter_mut().for_each(|v| *v = 0.0);
+            }
+        }
+
+        let t0 = std::time::Instant::now();
+        for _ in 0..hops {
+            self.process(&ptrs, frames, params);
+        }
+        let us = t0.elapsed().as_micros() as u64 / hops as u64;
+
+        // 実音を流す前に呼ぶので、状態と FIFO を初期化しておく。
+        self.reset();
+        us
     }
 
     /// タイムスタンプの不連続や再開時に呼ぶ。

@@ -18,12 +18,14 @@ use dpdfnet as dsp;
 mod dump;
 mod ffi;
 mod filter;
-mod load;
 mod log;
 mod meter;
 mod paths;
 mod preset;
 mod ui;
+
+// 負荷の判定は共通クレート側（VST3 版と同じしきい値を使う）。
+pub use dpdfnet::load;
 
 use ffi::*;
 

@@ -342,7 +342,7 @@ fn debug_paths() {
 
     let mut eng = engine::build(1, 48_000, &model, std::slice::from_ref(&ort_dir), DeviceChoice::Cpu, Arc::new(Meters::new()))
         .expect("build");
-    let hop = eng.hop();
+    let hop = eng.hop_samples();
 
     let mut out = x.clone();
     let mut pos = 0usize;
@@ -401,7 +401,7 @@ fn offline_latency_and_channel_consistency() {
     // ---- 1 ch ----
     let mut eng1 = engine::build(1, 48_000, &model, std::slice::from_ref(&ort_dir), DeviceChoice::Cpu, Arc::new(Meters::new()))
         .expect("エンジン構築に失敗");
-    let hop = eng1.hop();
+    let hop = eng1.hop_samples();
     assert_eq!(hop, 480, "hop は 480 であること");
     assert_eq!(
         eng1.latency_samples,
@@ -558,9 +558,9 @@ fn offline_gpu_matches_cpu() {
     );
     assert_eq!(
         lag,
-        engine::K_LATENCY_HOPS * cpu.hop(),
+        engine::K_LATENCY_HOPS * cpu.hop_samples(),
         "GPU 経路の遅延が {} サンプルではない (実測 {lag})",
-        engine::K_LATENCY_HOPS * cpu.hop()
+        engine::K_LATENCY_HOPS * cpu.hop_samples()
     );
 
     // 音の一致（ビット一致はしない。SNR で見る）。
@@ -857,5 +857,78 @@ fn offline_rate_conversion_96k() {
     assert!(
         (r96 / r48 - 1.0).abs() < 0.5,
         "96 kHz と 48 kHz で出力レベルが違いすぎる ({r96} vs {r48})"
+    );
+}
+
+/// 起動時キャリブレーション（`Engine::measure_hop_us`）の検証。
+///
+/// OBS 版 / VST3 版はこれで「このマシンで品質モデルが回るか」を音を出す前に
+/// 判断する。ここで確かめるのは 2 点:
+///
+///   1. 妥当な値が出る（予算 10 ms に対して 0 でも 100 ms でもない）
+///   2. **エンジンに痕跡を残さない** — 実測後に同じ音を流したときの出力が、
+///      実測していないエンジンの出力とビット一致する（実測は `reset()` で
+///      終わるので、状態・FIFO ともに新品と同じ）
+///
+/// 2 は重要で、これが崩れると「起動時だけ音が違う」という嫌な不具合になる。
+#[test]
+fn calibration_leaves_no_trace_and_reports_a_sane_time() {
+    let Some(ort_dir) = env_path("DPDFNET_ORT") else {
+        eprintln!("skip: DPDFNET_ORT が未設定");
+        return;
+    };
+    let Some(model) = env_path("DPDFNET_MODEL") else {
+        eprintln!("skip: DPDFNET_MODEL が未設定");
+        return;
+    };
+    let Some(wav) = find_test_wav() else {
+        eprintln!("skip: テスト用 WAV が見つからない");
+        return;
+    };
+
+    let (x, sr) = read_wav_mono(&wav).expect("WAV 読み込み失敗");
+    assert_eq!(sr, 48_000, "テスト信号は 48 kHz であること");
+    // 0.5 秒あれば数十ホップ走る（状態が十分に進む）。
+    let x: Vec<f32> = x.into_iter().take(24_000).collect();
+    let block = 1024usize;
+    let params = engine::ParamSnapshot::default();
+
+    let build = |m: &Path| {
+        engine::build(
+            2,
+            48_000,
+            m,
+            std::slice::from_ref(&ort_dir),
+            DeviceChoice::Cpu,
+            Arc::new(Meters::new()),
+        )
+        .expect("エンジン構築に失敗")
+    };
+
+    // 参照: 実測を挟まずに回す。
+    let mut plain = build(&model);
+    assert_eq!(plain.budget_us, 10_000, "48 kHz の予算は 10 ms であること");
+    let expected = run_stream(&mut plain, &[x.clone(), x.clone()], block, params);
+
+    // 実測してから同じ音を回す。
+    let mut calibrated = build(&model);
+    let us = calibrated.measure_hop_us(2, 6);
+    let pct = us as f64 * 100.0 / calibrated.budget_us as f64;
+    eprintln!(
+        "measure_hop_us = {:.2} ms / 予算 {:.2} ms ({pct:.0} %)  model={}",
+        us as f64 / 1000.0,
+        calibrated.budget_us as f64 / 1000.0,
+        model.file_name().unwrap_or_default().to_string_lossy(),
+    );
+    assert!(us > 0, "実測値が 0");
+    assert!(
+        us < 2_000_000,
+        "実測値が大きすぎる（マイク入力を含む？）: {us} us"
+    );
+
+    let got = run_stream(&mut calibrated, &[x.clone(), x.clone()], block, params);
+    assert_eq!(
+        got, expected,
+        "実測がエンジンに痕跡を残している（実測後の出力が変わった）"
     );
 }

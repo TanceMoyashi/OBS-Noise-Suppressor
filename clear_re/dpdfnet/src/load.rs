@@ -1,15 +1,16 @@
 //! 「音声処理がリアルタイムに間に合っているか」の判定。
 //!
-//! 計測は `dsp::engine::Meters`（オーディオスレッドが 1 ホップごとに足し込む）
+//! 計測は `crate::engine::Meters`（オーディオスレッドが 1 ホップごとに足し込む）
 //! が持ち、判定はここで行う。ここは**純関数だけ**にしてあるので、スレッドを
-//! 立てずにテストできる。
+//! 立てずにテストできる。OBS 版と VST3 版が同じ基準を使う（しきい値を 2 箇所に
+//! 書かないため、このモジュールは共通クレート側にある）。
 //!
 //! 背景: DPDFNet の推論は 1 ホップ = 480 サンプル (10 ms) ごとに走る。ノート
-//! PC などでこの 10 ms を超えると、OBS の音声スレッドが詰まって音が途切れ、
+//! PC などでこの 10 ms を超えると、ホストの音声スレッドが詰まって音が途切れ、
 //! 見かけ上「音が遅れる」状態になる。実測では高品質モデル (`dpdfnet8`) は
 //! 速い CPU でも 1 コアの 7 割を使うため、余裕の有無をログに残す価値が高い。
 
-use crate::dsp::engine::DspStats;
+use crate::engine::DspStats;
 
 /// 判定に使う最小のホップ数。少なすぎるサンプルで誤判定しないための下限。
 pub const MIN_HOPS: u64 = 50;
@@ -97,6 +98,25 @@ pub fn sample(prev: DspStats, cur: DspStats) -> Option<Load> {
         slow: avg_us > budget_us * SLOW_AVG_RATIO || over_pct >= SLOW_OVER_PCT,
         critical: avg_us > budget_us * CRITICAL_AVG_RATIO || over_pct >= CRITICAL_OVER_PCT,
     })
+}
+
+/// 起動時キャリブレーション（音を出す前の実測）で「重すぎる」と判定する比。
+///
+/// 実測はマシンが空いているときに取るので、実運用の値より小さく出る。この開発機
+/// では dpdfnet8 が **実測 5.5 ms ↔ 実運用 6.7 ms（予算 10 ms）** で約 1.2 倍。
+/// その分を織り込んで、実行中の警告水準 (`SLOW_AVG_RATIO` = 0.95) より低い
+/// ところで軽くする（0.75 × 1.2 = 0.9 倍でまだ予算内）。
+pub const START_CALIBRATION_RATIO: f64 = 0.75;
+
+/// 起動時（＝まだ音を出していないとき）の判定: この実測値なら品質モデルは
+/// 重すぎるか。
+///
+/// `avg_us` は `Engine::measure_hop_us` の実測値。**音が乱れる前に決める**のが
+/// 目的なので、実行中の監視 (`critical` = 予算超過) ではなく
+/// `START_CALIBRATION_RATIO` を使う。予算が分からないとき (`budget_us == 0`)
+/// は判定しない。
+pub fn too_slow_at_start(avg_us: u64, budget_us: u64) -> bool {
+    budget_us > 0 && avg_us as f64 > budget_us as f64 * START_CALIBRATION_RATIO
 }
 
 #[cfg(test)]
@@ -216,5 +236,17 @@ mod tests {
         assert_eq!(l.over_pct, 0.0);
         assert!(!l.slow);
         assert!(!l.critical);
+    }
+
+    #[test]
+    fn start_calibration_uses_the_calibration_level() {
+        // 予算 10 ms。この開発機の実測は dpdfnet8 で 5.5 ms → 通す。
+        assert!(!too_slow_at_start(5_500, 10_000));
+        // 7.0 ms（70 %）までは通す。
+        assert!(!too_slow_at_start(7_000, 10_000));
+        // 7.6 ms（76 %）は軽くする（実運用では 1.2 倍の 9.1 ms になる）。
+        assert!(too_slow_at_start(7_600, 10_000));
+        // 予算が分からないときは判定しない（呼び出し側がログだけ出す）。
+        assert!(!too_slow_at_start(9_600, 0));
     }
 }

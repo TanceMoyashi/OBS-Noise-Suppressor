@@ -1,0 +1,32 @@
+[package]
+name = "dpdfnet-voice-vst3"
+version = "0.3.0"
+edition = "2021"
+publish = false
+license = "GPL-2.0-or-later"
+description = "DPDFNet Voice - VST3 speech enhancement plugin for DAWs (shares the DSP core with the OBS filter)"
+
+[lib]
+# cdylib = VST3（アセットは .vst3 にリネームして置く）。
+# rlib はテストのため（`cargo test` でホスト無しに DSP 経路を確認する）。
+name = "dpdfnet_voice"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+# OBS 版とまったく同じ DSP コア（音声経路・遅延・パラメータの意味が共通）。
+dpdfnet = { path = "../dpdfnet" }
+
+# nih-plug は crates.io に出ていないので git から取る。
+# rev を固定しているのは、VST3 SDK 側 (vst3-sys) も含めて再現できるようにするため。
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "de421011f41a6d10fc8c7a6084e4f4dee0143683" }
+
+# DAW はプラグインを自プロセスに読み込むので、パニックで DAW ごと落とさない。
+[profile.release]
+panic = "unwind"
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+panic = "unwind"

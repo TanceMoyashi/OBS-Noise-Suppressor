@@ -503,6 +503,24 @@ impl FilterData {
             Arc::clone(&self.shared.meters),
         ) {
             Ok(eng) => {
+                let mut eng = eng;
+                // 起動時キャリブレーション: 音を出す前に「このマシンで回るか」を
+                // 実測して、重ければ軽量モデルで組み直す（下の関数を参照）。
+                let mut model_now = want_model;
+                let mut forced_now = forced;
+                if let Some(light) = self.calibrate_and_maybe_downgrade(
+                    &mut eng,
+                    want,
+                    sr,
+                    want_model,
+                    want_device,
+                    forced,
+                ) {
+                    eng = light;
+                    model_now = paths::ModelChoice::Fast;
+                    forced_now = model_now.code();
+                }
+
                 let summary = eng.model_summary.clone();
                 let eng_latency = eng.latency_samples;
                 let added_ms = eng.added_latency_ms;
@@ -512,7 +530,7 @@ impl FilterData {
 
                 let old = self.engine.swap(ptr, Ordering::AcqRel);
                 self.engine_channels.store(want, Ordering::Relaxed);
-                self.engine_model.store(want_model.code(), Ordering::Relaxed);
+                self.engine_model.store(model_now.code(), Ordering::Relaxed);
                 self.engine_device.store(device_used.code(), Ordering::Relaxed);
                 self.engine_rate.store(sr, Ordering::Relaxed);
                 self.shared.dereverb.store(dereverb, Ordering::Relaxed);
@@ -559,10 +577,10 @@ impl FilterData {
                 };
                 // 負荷で自動的に落ちている場合は、そのことが分かるように書く
                 // （プロパティの設定は「自動」のままなので、混乱しないように）。
-                let model_label = if forced == FORCED_NONE {
-                    want_model.as_str().to_string()
+                let model_label = if forced_now == FORCED_NONE {
+                    model_now.as_str().to_string()
                 } else {
-                    format!("{} (負荷により自動切替)", want_model.as_str())
+                    format!("{} (負荷により自動切替)", model_now.as_str())
                 };
                 // GPU を指定したのに組み立てられなかったときは、そう書く
                 // （黙って CPU で動くと「GPU が効いていない」ことに気付けない）。
@@ -581,6 +599,80 @@ impl FilterData {
             Err(e) => {
                 self.set_status_detail(ST_MODEL_LOAD_FAILED, format!("モデルの読み込みに失敗: {e}"));
                 false
+            }
+        }
+    }
+
+    /// 起動時キャリブレーション: 組んだエンジンを実際に空回しして、このマシンで
+    /// 予算（1 ホップ = 480 サンプル = 10 ms）に収まるかを測る。
+    ///
+    /// 収まらなければ**軽量モデルを組んで返す**。呼び出し側はそれを採用し、
+    /// パネルには「負荷により自動切替」と出す（監視スレッドが落としたときと
+    /// 同じ見え方にする）。
+    ///
+    /// 監視スレッドの自動フォールバック（下）は「3 秒続けて間に合わない」のを
+    /// 待ってから落とすので、その 3 秒ぶんは音が乱れる。遅い PC ではこれが
+    /// 「音が 3 秒遅れる」ように見えるため、**音を出す前に**決めてしまう。
+    ///
+    /// 判定は次のときだけ行う（＝ユーザーの明示指定や検証用の固定は尊重する）:
+    ///   * 自動フォールバックと同じ条件（`FORCED_NONE` / 設定「自動」/ env 未設定）
+    ///   * 軽量モデルが探索先にある
+    fn calibrate_and_maybe_downgrade(
+        &self,
+        eng: &mut Engine,
+        want: usize,
+        sr: u32,
+        want_model: paths::ModelChoice,
+        want_device: paths::DeviceChoice,
+        forced: u8,
+    ) -> Option<Engine> {
+        if forced != FORCED_NONE
+            || want_model != paths::ModelChoice::Auto
+            || paths::env_model_file().is_some()
+        {
+            return None;
+        }
+        let light = paths::find_model_choice(paths::ModelChoice::Fast, &self.resource_dirs)?;
+
+        let budget_us = eng.budget_us;
+        let avg_us = eng.measure_hop_us(CALIBRATION_WARMUP_HOPS, CALIBRATION_HOPS);
+        let ms = avg_us as f64 / 1000.0;
+        let budget_ms = budget_us as f64 / 1000.0;
+        let pct = avg_us as f64 * 100.0 / budget_us.max(1) as f64;
+
+        if !crate::load::too_slow_at_start(avg_us, budget_us) {
+            obs_log!(
+                crate::ffi::LOG_INFO,
+                "起動時の実測: {ms:.2} ms / 予算 {budget_ms:.2} ms ({pct:.0} %) — 品質モデルのまま開始します"
+            );
+            return None;
+        }
+
+        obs_log!(
+            crate::ffi::LOG_INFO,
+            "起動時の実測が予算に収まらないため軽量モデルで開始します: {ms:.2} ms / 予算 {budget_ms:.2} ms ({pct:.0} %)"
+        );
+        match engine::build(
+            want,
+            sr,
+            &light,
+            &self.resource_dirs,
+            want_device,
+            Arc::clone(&self.shared.meters),
+        ) {
+            Ok(light_eng) => {
+                // ここで指定を残すので、以後の `update` / `activate` も軽量で組まれる
+                // （監視スレッドの `fallback_to_light` と同じ扱い）。
+                self.forced_model
+                    .store(paths::ModelChoice::Fast.code(), Ordering::Relaxed);
+                Some(light_eng)
+            }
+            Err(e) => {
+                obs_log!(
+                    crate::ffi::LOG_WARNING,
+                    "軽量モデルに切り替えられませんでした（品質モデルのまま続けます）: {e}"
+                );
+                None
             }
         }
     }
@@ -1169,13 +1261,24 @@ pub unsafe extern "C" fn filter_audio(
 // 間に合わないと OBS の音声スレッドが詰まり、音が途切れて「音が遅れる」ように
 // 見える。速い CPU でも高品質モデル (`dpdfnet8`) は 1 コアの 7 割を使うので、
 //
+//   * 起動前に「このマシンで回るか」を実測し、重ければ最初から軽量モデルで
+//     始める（`calibrate_and_maybe_downgrade`）
 //   * 余裕がどれくらいあるかを 1 行だけログに残す（切り分け用）
 //   * 間に合っていない状態が続いたら、1 度だけ軽量モデルへ自動で落とす
 //
-// を行う。判定は `crate::load`（純関数）側にある。
+// を行う。判定は共通クレートの `crate::load`（純関数）側にある。
 
 /// 自動フォールバックの指定が無いことを表す値（`engine_model` と同じ流儀）。
 const FORCED_NONE: u8 = u8::MAX;
+
+/// 起動時キャリブレーションで捨てるホップ数。
+///
+/// 最初のホップは ONNX Runtime の初回実行（グラフ初期化・メモリ確保）で跳ねる
+/// ので、平均に入れない。
+const CALIBRATION_WARMUP_HOPS: usize = 2;
+
+/// 起動時キャリブレーションで測るホップ数（6 ホップ = 60 ms ぶんの推論）。
+const CALIBRATION_HOPS: usize = 6;
 
 /// 監視の周期。短くしておくと `destroy` の待ち時間も短くなる。
 const WATCH_PERIOD: Duration = Duration::from_millis(1000);

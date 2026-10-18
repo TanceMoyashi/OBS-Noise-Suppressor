@@ -23,6 +23,7 @@
 //! このクレートを共有している。
 
 pub mod engine;
+pub mod load;
 pub mod log;
 pub mod meta;
 pub mod net;
