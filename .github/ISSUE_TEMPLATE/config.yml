@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 使い方・対応環境（README）
+    url: https://github.com/TanceMoyashi/OBS-Noise-Suppressor#readme
+    about: インストール手順・対応サンプルレート・遅延・既知の制限はこちら。
+  - name: ダウンロード（Releases）
+    url: https://github.com/TanceMoyashi/OBS-Noise-Suppressor/releases
+    about: 最新版の配布 ZIP はこちら。まず最新版か確認してください。
+  - name: 動作確認の手順と期待値（OBS_VERIFY.md）
+    url: https://github.com/TanceMoyashi/OBS-Noise-Suppressor/blob/main/clear_re/obs_plugin/OBS_VERIFY.md
+    about: 「効いているか分からない」ときの確認方法と、正常時の数値を載せています。
+  - name: 質問・雑談（Discussions）
+    url: https://github.com/TanceMoyashi/OBS-Noise-Suppressor/discussions
+    about: 不具合かどうか分からない相談や、使い方の質問はこちらへ。

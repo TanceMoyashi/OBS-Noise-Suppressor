@@ -1,0 +1,132 @@
+name: 不具合の報告
+description: 音が出ない / ノイズや残響が消えない / クラッシュする など
+title: "[不具合] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        報告ありがとうございます。**書ける範囲で構いません。分からない欄は空のままで大丈夫です。**
+
+        このプラグインは **AI コーディングで作られた無保証のソフトウェア**です
+        （[README](https://github.com/TanceMoyashi/OBS-Noise-Suppressor#readme) の
+        「AI による制作について」を参照）。すべての報告に対応できるとは限らないことを
+        ご了承ください。
+
+        > **ヒント**: ログは
+        > `%APPDATA%\obs-studio\plugin_config\obs_noise_suppressor\obs_noise_suppressor.log`
+        > にあります（OBS 標準のログにも `[obs-noise-suppressor]` 付きで同じ内容が出ます）。
+
+  - type: checkboxes
+    id: precheck
+    attributes:
+      label: 先に確認したこと
+      options:
+        - label: 最新版を使っていることを確認した（[Releases](https://github.com/TanceMoyashi/OBS-Noise-Suppressor/releases)）
+          required: true
+        - label: 同じ報告が既にないか [Issues](https://github.com/TanceMoyashi/OBS-Noise-Suppressor/issues?q=is%3Aissue) を検索した
+          required: true
+        - label: OBS を再起動しても症状が直らない
+        - label: フィルタが有効になっている（音声フィルタの一覧で目玉アイコンが点灯している）
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: 症状
+      description: 起きたことを書いてください。
+      placeholder: 例) マイクにフィルタを挿すと音がまったく出なくなる
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 再現手順
+      description: 同じ症状が出る手順を、順番に書いてください。
+      placeholder: |
+        1. OBS の音声設定を 48 kHz にする
+        2. マイクに「OBS Noise Suppressor」を追加する
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待していた動作
+      description: どうなると思っていましたか？（分からなければ空で構いません）
+      placeholder: 例) ノイズだけが消えて、声はそのまま聞こえるはず
+
+  - type: input
+    id: plugin_version
+    attributes:
+      label: プラグインのバージョン
+      description: 配布 ZIP のファイル名か、OBS のログの `OBS Noise Suppressor v...` の行を書いてください。
+      placeholder: 例) 0.3.0
+    validations:
+      required: true
+
+  - type: input
+    id: obs_version
+    attributes:
+      label: OBS のバージョン
+      description: OBS の「ヘルプ → OBS について」で確認できます。
+      placeholder: 例) 32.2.2 (64-bit, windows)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: sample_rate
+    attributes:
+      label: OBS のサンプルレート（設定 → 音声）
+      options:
+        - 48 kHz
+        - 44.1 kHz
+        - 88.2 kHz
+        - 96 kHz
+        - 176.4 kHz
+        - 192 kHz
+        - 分からない / その他
+    validations:
+      required: true
+
+  - type: dropdown
+    id: model
+    attributes:
+      label: モデルの設定（フィルタのプロパティ）
+      options:
+        - 自動（既定）
+        - 高品質 (dp8)
+        - 軽量 (dp2)
+        - 分からない / その他
+    validations:
+      required: true
+
+  - type: dropdown
+    id: channels
+    attributes:
+      label: チャンネル構成
+      options:
+        - ステレオ
+        - モノラル
+        - 分からない
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: ログ
+      description: |
+        下記のファイルの中身を貼り付けてください（長い場合は、症状が出た前後の数十行だけで構いません）。
+        `%APPDATA%\obs-studio\plugin_config\obs_noise_suppressor\obs_noise_suppressor.log`
+      render: text
+      placeholder: |
+        2026-10-18 19:56:55.078 [INFO] OBS Noise Suppressor v0.3.0 を読み込みました
+        2026-10-18 19:56:55.514 [INFO] status: 96 kHz / ch=2 / latency 2880 samples (60 ms) / ...
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 補足
+      description: その他に気づいたこと（GPU / CPU、他のフィルタとの併用、以前は出なかった など）

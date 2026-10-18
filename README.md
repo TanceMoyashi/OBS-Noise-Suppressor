@@ -167,6 +167,20 @@ OBS 標準のログ（`%APPDATA%\obs-studio\logs\*.txt`）にも同じ内容が�
 だけを残し、毎フレーム同じ警告が出るような場合も間引きます。書き込めない環境でも
 音声処理は止めません。
 
+## 不具合報告・要望
+
+どなたでも Issue を立てられます（テンプレートを用意しています）。
+
+- **不具合**: [不具合の報告を書く](https://github.com/TanceMoyashi/OBS-Noise-Suppressor/issues/new?template=bug_report.yml)
+  （OBS のバージョン・サンプルレート・ログを書く欄があります）
+- **機能の追加・改善の希望**: [要望を書く](https://github.com/TanceMoyashi/OBS-Noise-Suppressor/issues/new?template=feature_request.yml)
+- 不具合かどうか分からない相談や使い方の質問: [Discussions](https://github.com/TanceMoyashi/OBS-Noise-Suppressor/discussions)
+
+**このリポジトリのコードを直接変更できるのは、作者が承認した人だけです**（`main` は
+保護されていて、直接の push や履歴の書き換えはできません）。それ以外の方は
+リポジトリを fork して Pull Request を送ってください。対応は保証できません
+（AI 生成の無保証ソフトです。「AI による制作について」を参照）。
+
 ## ライセンス
 
 このリポジトリは **AI が生成したコードを含みます**（「AI による制作について」を参照）。**無保証**です。

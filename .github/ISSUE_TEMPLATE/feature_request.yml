@@ -1,0 +1,69 @@
+name: 機能の追加・改善の希望
+description: こんな機能がほしい / ここが使いにくい を教えてください
+title: "[要望] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        要望をありがとうございます。**すべてを実装できるとは限りません**が、
+        現場で困っていることを教えてもらえると助かります。
+
+        このプラグインは **AI コーディングで作られた無保証のソフトウェア**です
+        （[README](https://github.com/TanceMoyashi/OBS-Noise-Suppressor#readme) の
+        「AI による制作について」を参照）。
+
+  - type: checkboxes
+    id: precheck
+    attributes:
+      label: 先に確認したこと
+      options:
+        - label: 同じ要望が既にないか [Issues](https://github.com/TanceMoyashi/OBS-Noise-Suppressor/issues?q=is%3Aissue) を検索した
+          required: true
+        - label: 最新版で既にできるか確認した（[Releases](https://github.com/TanceMoyashi/OBS-Noise-Suppressor/releases) と README）
+        - label: このプラグインの役割（ノイズ抑制 / 残響除去）に関係する内容である
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 困っていること
+      description: 「どんなときに」「何に困るか」を書いてください。機能の名前より、状況の方が助かります。
+      placeholder: 例) 配信中にフィルタの効き具合を切り替えたいが、毎回プロパティを開くのが面倒
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 提案する方法
+      description: こうなってほしい、という案があれば書いてください（実装方法の指定は不要です）。
+      placeholder: 例) パネルに「効き具合」のプリセット切り替えボタンを置く
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 代わりに試していること
+      description: 今は別の方法で回避していますか？（無ければ空で構いません）
+      placeholder: 例) OBS のショートカットで別シーンに切り替えて対応している
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 関係しそうな場所
+      options:
+        - パネル UI（メーター / つまみ / プリセット）
+        - 音質・DSP（ノイズ抑制 / 残響除去の強さ）
+        - サンプルレート・遅延
+        - インストール / 更新
+        - ログ・不具合の切り分け
+        - その他 / 分からない
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 補足
+      description: 参考になる URL、他のソフトでの実装例などがあれば書いてください。
