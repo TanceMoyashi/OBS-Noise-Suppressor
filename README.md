@@ -50,6 +50,7 @@ ONNX Runtime と DPDFNet モデルを同梱した Windows x64 版で、追加の
 | VU 基準値 | −20 / −18 / −14 dBFS（既定 −18 = EBU）。目盛りが対応 dBFS ごと平行移動 |
 | 数値表示 | フェーダーの dB と %、IN / OUT の現在値 / ピーク dBFS、GR の抑圧量 dB |
 | インストーラー | レジストリ不使用 / 管理者権限不要 / アンインストーラー同梱 |
+| VST3 版 | 同じ DSP を使う DAW 用プラグイン `DPDFNet Voice`（`clear_re/vst3/`）。OBS 版と DSP / パラメータ / 遅延が共通 |
 | 音声スレッド | CPU はアロケーションなし（テンソル・バッファは事前確保し `IoBinding` で再利用）。GPU (DirectML) は毎 hop 束ねを作り直す（下記） |
 | 堅牢性 | FFI 境界ごとに `catch_unwind`。落ちずにパススルーへ退避 |
 | ログ | エラー / 警告 / 起動情報を専用ファイルに常時記録（OBS 標準ログにも同じ内容が出ます） |
@@ -83,6 +84,28 @@ OBS のプロパティにある **「パネルを開く（フェーダー / メ�
 検出できた場合は `<OBS>\obs-plugins\64bit\` にも自動でコピーします。
 削除は `uninstall.bat` です。
 
+## VST3 版（DAW 用）
+
+**同じ DSP を DAW でも**使えるようにした VST3 プラグイン（`DPDFNet Voice`）を
+別パッケージで配ります。旧 VST3 版（JUCE、`clear_re/plugin/`）の復活ではなく、
+現行の Rust DSP（`clear_re/dpdfnet/`）を共有した新しいシェルです。
+
+1. `DPDFNet-Voice-x.y.z-vst3.zip` を展開して `install.bat`（中身は `install.ps1`）。
+2. 既定で `C:\Program Files\Common Files\VST3\` に入ります（管理者が要ります）。
+   管理者なしでよければ `install.bat -User` で `%APPDATA%\VST3\` へ。
+3. DAW を起動し直して、モデルと ONNX Runtime ごと同梱された
+   `DPDFNet Voice`（モノラル / ステレオ）をトラックに挿します。
+
+| 項目 | 内容 |
+| --- | --- |
+| パラメータ | Ambience / Voice (±12 dB) / Voice Reverb + 各ミュート / バイパス。範囲も既定値も OBS 版と同じ |
+| モデル / 推論デバイス | ホストの汎用パラメータ表示から変更（自動化には載りません）。**変更すると一瞬音が途切れます**（その場で組み立て直すため） |
+| 遅延 | 48 kHz で **2880 サンプル (60 ms)**。ホストに報告するので DAW 側で自動補正されます |
+| GUI | まだありません（ホストの汎用パラメータ表示で操作。プリセットは DAW 側の保存に乗ります） |
+| ログ | DAW のログに出ます。`set NIH_LOG=%TEMP%\dpdfnet-vst3.log` でファイルにも |
+
+詳しくは [`clear_re/vst3/README.md`](clear_re/vst3/README.md) をどうぞ。
+
 ## 動作要件
 
 - OBS Studio 28 以降 / Windows x64（検証は 32.2.2）
@@ -102,10 +125,15 @@ OBS のプロパティにある **「パネルを開く（フェーダー / メ�
 ```powershell
 cd clear_re\obs_plugin
 .\build.ps1                 # cargo build --release（配布する DLL）
-.\build.ps1 -Tests          # cargo test --release --lib（83 テスト）
+.\build.ps1 -Tests          # cargo test --release --lib（OBS 版 41 + DSP コア 45 テスト）
 .\tools\make_package.ps1    # 配布パッケージ (dist\) と ZIP を作る
 .\tools\make_package.ps1 -GpuPack  # GPU (DirectML) の追加パックを作る
 .\tools\run_obs_verify.ps1  # OBS を実際に回して遅延と DSP を数値で確認する
+
+cd ..\vst3
+.\build.ps1                 # VST3 版（cargo build --release）
+.\build.ps1 -Tests          # VST3 版のテスト（モデルを指定するとオフライン検証も走る）
+.\tools\make_package.ps1    # VST3 版の配布パッケージ (dist\) と ZIP を作る
 ```
 
 必要なもの:
@@ -113,6 +141,8 @@ cd clear_re\obs_plugin
 - Rust（MSVC ツールチェーン）+ Visual Studio の C++ ビルドツール
   （`build.ps1` が `vcvars64.bat` を探します）
 - OBS Studio が `C:\Program Files\obs-studio` にあること（`obs.lib` の参照のため）
+- VST3 版だけなら OBS は不要（代わりに初回ビルドで nih-plug と VST3 SDK を
+  取ってくるためネットワークが要ります）
 
 ONNX Runtime とモデルは `vendor/` と `clear_re/plugin/models/` に入っているので、
 クローン直後でもビルドと配置ができます。
@@ -122,8 +152,10 @@ ONNX Runtime とモデルは `vendor/` と `clear_re/plugin/models/` に入っ�
 | パス | 内容 |
 | --- | --- |
 | `clear_re/obs_plugin/` | **現行版**。Rust の OBS プラグイン本体 + ビルド / インストール / 検証ツール |
-| `clear_re/obs_plugin/src/` | `filter.rs`（OBS フィルタ）/ `ui.rs`（パネル）/ `dsp/`（DSP と ONNX）/ `meter.rs` / `preset.rs` / `paths.rs` / `ffi.rs` |
-| `clear_re/plugin/` | 旧 VST3 版（DPDFNet Voice）。**保守対象外**。DSP の移植元 + モデルの置き場 |
+| `clear_re/obs_plugin/src/` | `filter.rs`（OBS フィルタ）/ `ui.rs`（パネル）/ `meter.rs` / `preset.rs` / `paths.rs` / `ffi.rs`。DSP は下の `dpdfnet` を呼ぶだけ |
+| `clear_re/dpdfnet/` | **共通 DSP コア**（ホスト非依存）。STFT / モデル / 遅延 / レート変換 / 負荷判定。OBS 版と VST3 版が共有する |
+| `clear_re/vst3/` | **VST3 版**（DAW 用）。nih-plug のシェル + インストーラ / パッケージツール |
+| `clear_re/plugin/` | 旧 VST3 版（DPDFNet Voice、JUCE）。**保守対象外**。DSP の移植元 + モデルの置き場 |
 | `clear_re/ANALYSIS.md` | 旧 VST3 版の設計経緯・確定事項 |
 | `docs/` | この README 用の画像 |
 | `dist/`（未追跡） | `tools/make_package.ps1` が生成する配布パッケージ |
@@ -134,7 +166,51 @@ ONNX Runtime とモデルは `vendor/` と `clear_re/plugin/models/` に入っ�
 | --- | --- |
 | `clear_re/obs_plugin/README.md` | 機能・プロパティ・パネル・ファイル構成の詳細 |
 | `clear_re/obs_plugin/OBS_VERIFY.md` | 実機検証の手順と結果、トラブルシュート |
+| `clear_re/vst3/README.md` | VST3 版のビルド・インストール・検証 |
 | `clear_re/ANALYSIS.md` | 旧 VST3 版の解析（DSP をどう移植したか） |
+
+## 重い / 音が途切れる・遅れて聞こえるとき
+
+**症状**: 音が数秒遅れて聞こえる、ブツブツ切れる、声がロボットのようになる。
+
+原因はほぼ **CPU が 1 ホップ = 480 サンプル（48 kHz で 10 ms）に追いついていない**
+ことです。プラグイン自身が遅延を溜め込むことはありません（内容遅延は常に 2880
+サンプル = 60 ms で固定）。追いつかないと OBS の音声スレッドが詰まり、**音が
+遅れて聞こえる**ように見えます。
+
+| 手順 | 内容 |
+| --- | --- |
+| 1 | フィルタのプロパティで **「モデル」を `軽量 (dp2)`** にする（負荷が約 1/3） |
+| 2 | Windows の電源プランを **「高パフォーマンス」** にする（ノート PC をバッテリーで使っていると特に） |
+| 3 | 録画 / 配信のエンコーダを **GPU（NVENC / QSV / AMF）** にする（x264 = CPU エンコードは 1 ホップの予算を奪う） |
+| 4 | 他に重いフィルタ / プラグインがあれば外す。OBS の「統計」で `skipped frames` が増えていないか見る |
+| 5 | 最新版に更新する（**起動時キャリブレーション**が入った版以降。「自動」でも最初から軽量モデルで始まる） |
+
+効果はログで確認できます（`起動時の実測:` と `音声処理の負荷:` の行）。
+「平均が予算の 95 % 超 / 予算超過のホップが 25 % 以上」が出ているときは、
+そのまま上の手順を試してください。詳しくは
+[`clear_re/obs_plugin/README.md` の「CPU 負荷の目安」](clear_re/obs_plugin/README.md#cpu-負荷の目安音が途切れる--遅れて聞こえるとき)。
+
+### 相手の PC を切り分けるとき（そのまま送れる文面）
+
+> 音が数秒遅れて途切れるのは、CPU が音声処理（10 ms ごとの AI 推論）に
+> 追いついていないのが原因です。プラグインの遅延自体は 60 ms で固定なので、
+> 遅れが積み上がることはありません。次の順で試してください。
+>
+> 1. フィルタのプロパティ →「モデル」を **軽量 (dp2)** に変更（いちばん効きます）
+> 2. Windows の設定 → システム → 電源 → 電源モードを **最適なパフォーマンス** に
+> 3. OBS の設定 → 出力 → エンコーダを **ハードウェア（NVENC / QSV / AMF）** に
+>    （ソフトウェア x264 は CPU を 1 コアぶん持っていきます）
+> 4. OBS の設定 → 詳細 → 音声バッファを確認（既定のままで OK）
+> 5. 最新版に差し替える（起動時に重さを測って、最初から軽いモデルで始まる版）
+>
+> それでも直らないときは、OBS の標準ログを送ってください。
+> OBS のメニュー「ヘルプ」→「ログファイル」→「現在のログファイルを表示」で開けます
+> （場所は `%APPDATA%\obs-studio\logs\`）。見るのは次の 3 点です。
+>
+> - `CPU Name:` の行（CPU の型番）
+> - `Audio buffering started (XXX ms)` と `ended` の行（音声バッファの詰まり）
+> - `skipped` / `lagged frames` の行（映像 / 音声の取りこぼし）
 
 ## 動作確認済みの環境
 

@@ -860,17 +860,38 @@ fn offline_rate_conversion_96k() {
     );
 }
 
+/// 検証用の決定的な信号（正弦 2 本 + 小さな擬似乱数ノイズ）。
+///
+/// **先頭から音が入っている**ことが大事。無音から始まる信号だと、モデルの
+/// 出力が 0 の間にパラメータ平滑が収束してしまい、キャリブレーションの痕跡を
+/// 見逃す（実際にそれで一度見逃した）。
+fn calibration_test_signal(n: usize) -> Vec<f32> {
+    let mut state: u32 = 0x1234_5678;
+    (0..n)
+        .map(|i| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let noise = ((state >> 8) as f32 / (1u32 << 24) as f32 - 0.5) * 0.02;
+            let t = i as f32 / 48_000.0;
+            let s = 0.5 * (std::f32::consts::TAU * 220.0 * t).sin()
+                + 0.3 * (std::f32::consts::TAU * 440.0 * t).sin();
+            s * 0.5 + noise
+        })
+        .collect()
+}
+
 /// 起動時キャリブレーション（`Engine::measure_hop_us`）の検証。
 ///
-/// OBS 版 / VST3 版はこれで「このマシンで品質モデルが回るか」を音を出す前に
-/// 判断する。ここで確かめるのは 2 点:
+/// OBS 版 / VST3 版は、これで「このマシンで品質モデルが回るか」を**音を出す前に**
+/// 判断する。確かめるのは 2 点:
 ///
 ///   1. 妥当な値が出る（予算 10 ms に対して 0 でも 100 ms でもない）
 ///   2. **エンジンに痕跡を残さない** — 実測後に同じ音を流したときの出力が、
-///      実測していないエンジンの出力とビット一致する（実測は `reset()` で
-///      終わるので、状態・FIFO ともに新品と同じ）
+///      実測していないエンジンの出力とビット一致する
 ///
-/// 2 は重要で、これが崩れると「起動時だけ音が違う」という嫌な不具合になる。
+/// 2 がこの機能の要。実測は 8 ホップ空回しするので、`reset()` が「新品と同じ
+/// 状態」に戻せていないと、**最初の数十 ms の出力が微妙に変わる**。これは実機の
+/// 検証で `max diff = 2.2e-7`（参照 vs 実機）として実際に出た不具合で、原因は
+/// パラメータ平滑 (`smoothed_noisy_weight` など) をリセットしていなかったこと。
 #[test]
 fn calibration_leaves_no_trace_and_reports_a_sane_time() {
     let Some(ort_dir) = env_path("DPDFNET_ORT") else {
@@ -881,15 +902,9 @@ fn calibration_leaves_no_trace_and_reports_a_sane_time() {
         eprintln!("skip: DPDFNET_MODEL が未設定");
         return;
     };
-    let Some(wav) = find_test_wav() else {
-        eprintln!("skip: テスト用 WAV が見つからない");
-        return;
-    };
 
-    let (x, sr) = read_wav_mono(&wav).expect("WAV 読み込み失敗");
-    assert_eq!(sr, 48_000, "テスト信号は 48 kHz であること");
-    // 0.5 秒あれば数十ホップ走る（状態が十分に進む）。
-    let x: Vec<f32> = x.into_iter().take(24_000).collect();
+    // 0.5 秒 = 50 ホップぶん。先頭から音が入っている。
+    let x = calibration_test_signal(24_000);
     let block = 1024usize;
     let params = engine::ParamSnapshot::default();
 
@@ -907,7 +922,10 @@ fn calibration_leaves_no_trace_and_reports_a_sane_time() {
 
     // 参照: 実測を挟まずに回す。
     let mut plain = build(&model);
-    assert_eq!(plain.budget_us, 10_000, "48 kHz の予算は 10 ms であること");
+    assert_eq!(
+        plain.budget_us, 10_000,
+        "48 kHz の予算は 1 ホップ = 10 ms であること"
+    );
     let expected = run_stream(&mut plain, &[x.clone(), x.clone()], block, params);
 
     // 実測してから同じ音を回す。
@@ -927,8 +945,21 @@ fn calibration_leaves_no_trace_and_reports_a_sane_time() {
     );
 
     let got = run_stream(&mut calibrated, &[x.clone(), x.clone()], block, params);
+    let diff = max_abs_diff(&got, &expected);
     assert_eq!(
-        got, expected,
-        "実測がエンジンに痕跡を残している（実測後の出力が変わった）"
+        diff, 0.0,
+        "実測がエンジンに痕跡を残している（実測後の出力が max {diff:e} 変わった）"
     );
+}
+
+/// 2 つの出力の最大差（チャンネル込み）。`assert_eq!` で巨大なベクタを
+/// 吐かないように、比較はこれで行う。
+fn max_abs_diff(a: &[Vec<f32>], b: &[Vec<f32>]) -> f32 {
+    let mut m = 0.0f32;
+    for (ca, cb) in a.iter().zip(b.iter()) {
+        for (x, y) in ca.iter().zip(cb.iter()) {
+            m = m.max((x - y).abs());
+        }
+    }
+    m
 }

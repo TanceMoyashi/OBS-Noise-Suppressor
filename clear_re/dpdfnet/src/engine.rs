@@ -26,6 +26,15 @@ pub const K_LATENCY_HOPS: usize = 6;
 /// モデル出力 1 フレームが参照する入力のずれ。
 pub const K_MODEL_LOOKAHEAD_HOPS: usize = 4;
 
+/// 起動直後（＝まだ何も流していない）のパラメータ平滑の値。
+///
+/// `build` と `reset` が同じ値を使う。`reset` を「新品と同じ状態に戻す」に
+/// しておかないと、`measure_hop_us`（起動時の空回し）やホストの停止 / 再開の
+/// あとに、平滑の途中から始まって**最初の数十 ms の出力が微妙に変わる**。
+pub const FRESH_NOISY_WEIGHT: f32 = 0.0;
+pub const FRESH_REVERB_BLEND: f32 = 0.0;
+pub const FRESH_VOICE_GAIN: f32 = 1.0;
+
 /// UI が読むパラメータのスナップショット（アトミックから集めた値）。
 #[derive(Clone, Copy, Debug)]
 pub struct ParamSnapshot {
@@ -569,9 +578,9 @@ pub fn build(
         in_fill: 0,
         out_fill: 0,
         out_read: 0,
-        smoothed_noisy_weight: 0.0,
-        smoothed_reverb_blend: 0.0,
-        voice_gain: 1.0,
+        smoothed_noisy_weight: FRESH_NOISY_WEIGHT,
+        smoothed_reverb_blend: FRESH_REVERB_BLEND,
+        voice_gain: FRESH_VOICE_GAIN,
         voice_hp_state: vec![0.0; num_channels],
         voice_hp_prev_x: vec![0.0; num_channels],
         voice_hp_coef: (-two_pi * 1500.0 / sr).exp(),
@@ -677,6 +686,10 @@ impl Engine {
         self.in_fill = 0;
         self.out_fill = 0;
         self.out_read = 0;
+
+        self.smoothed_noisy_weight = FRESH_NOISY_WEIGHT;
+        self.smoothed_reverb_blend = FRESH_REVERB_BLEND;
+        self.voice_gain = FRESH_VOICE_GAIN;
 
         self.voice_hp_state.iter_mut().for_each(|v| *v = 0.0);
         self.voice_hp_prev_x.iter_mut().for_each(|v| *v = 0.0);
