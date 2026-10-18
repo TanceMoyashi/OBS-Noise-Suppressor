@@ -1,10 +1,10 @@
 //! OBS フィルタ本体（libobs との境界）。
 //!
 //! `clear_re/plugin/src/PluginProcessor.cpp` の役割をそのまま引き継ぐ:
-//!   * 48 kHz 以外はパススルー
-//!   * モデル未ロードはパススルー
+//!   * 48 kHz 以外はレート変換してから本体へ渡す（`dsp::resample`）
+//!   * 変換段を作れない異常なレート、モデル未ロードはパススルー
 //!   * チャンネル数は OBS の音声設定に従う（モノラル/ステレオ）
-//!   * 内容遅延は `kLatencyHops * hop` = 2880 サンプル (60 ms)
+//!   * 内容遅延は `kLatencyHops * hop` = 2880 サンプル (60 ms) + 変換段の遅延
 //!
 //! スレッドモデル:
 //!   * `create` / `update` / `activate` / `deactivate` / `destroy` は UI スレッド
@@ -50,13 +50,24 @@ use crate::ui;
 // --------------------------------------------------------------------------
 
 pub const ST_OK: u32 = 0;
-pub const ST_NOT_48K: u32 = 1;
+/// レート変換段を作れないサンプルレート（パススルー）。
+pub const ST_BAD_RATE: u32 = 1;
 pub const ST_MODEL_NOT_FOUND: u32 = 2;
 pub const ST_MODEL_LOAD_FAILED: u32 = 3;
 pub const ST_ORT_UNAVAILABLE: u32 = 4;
 pub const ST_INACTIVE: u32 = 5;
 
-pub const OBS_SR: u32 = 48_000;
+/// モデルが前提にしている内部レート（`dsp::INTERNAL_SAMPLE_RATE`）。
+pub const OBS_SR: u32 = crate::dsp::INTERNAL_SAMPLE_RATE as u32;
+
+/// 表示用のレート表記（1000 の倍数は kHz）。ログとパネルで使う。
+pub fn rate_label(rate: u32) -> String {
+    if rate % 1000 == 0 {
+        format!("{} kHz", rate / 1000)
+    } else {
+        format!("{rate} Hz")
+    }
+}
 
 // --------------------------------------------------------------------------
 // パラメータ（オーディオスレッドはアトミックを読むだけ）
@@ -188,6 +199,10 @@ pub struct Shared {
     /// パネルがメーターを間引くのに使う。0 = エンジン未構築。
     pub channels: AtomicUsize,
 
+    /// エンジンが想定している OBS のサンプルレート。パネルの見出しに出す。
+    /// 0 = エンジン未構築。
+    pub rate: AtomicU32,
+
     status: AtomicU32,
     status_detail: Mutex<String>,
     /// モデルの概要（パネルに出す 1 行）。
@@ -203,6 +218,7 @@ impl Shared {
             panel: AtomicUsize::new(0),
             dereverb: AtomicBool::new(false),
             channels: AtomicUsize::new(0),
+            rate: AtomicU32::new(0),
             status: AtomicU32::new(ST_INACTIVE),
             status_detail: Mutex::new(String::new()),
             summary: Mutex::new(String::new()),
@@ -258,6 +274,8 @@ pub struct FilterData {
     /// 今のエンジンが使っているモデル（`paths::ModelChoice::code()`）。
     /// 設定変更で組み直すべきかの判定に使う。
     engine_model: AtomicU8,
+    /// 今のエンジンが想定しているサンプルレート。OBS の設定変更で変わる。
+    engine_rate: AtomicU32,
 
     /// 差し替えで引退したエンジン。オーディオスレッドがまだ使っている可能性が
     /// あるので、`destroy` まで保持する。
@@ -291,6 +309,7 @@ impl FilterData {
             engine: AtomicPtr::new(ptr::null_mut()),
             engine_channels: AtomicUsize::new(0),
             engine_model: AtomicU8::new(u8::MAX),
+            engine_rate: AtomicU32::new(0),
             retired: Mutex::new(Vec::new()),
             passthrough_logged: AtomicBool::new(false),
             last_timestamp: AtomicU64::new(0),
@@ -320,11 +339,15 @@ impl FilterData {
         }
 
         let sr = unsafe { crate::ffi::audio_output_get_sample_rate(audio) };
-        if sr != OBS_SR {
-            // 48 kHz 専用。他のレートではパススルー。
+        if !crate::dsp::resample::supported(sr) {
+            // 変換段を作れないレート（想定外の値）。安全側でパススルー。
+            self.shared.rate.store(0, Ordering::Relaxed);
             self.set_status_detail(
-                ST_NOT_48K,
-                format!("OBS の音声が {sr} Hz です。48 kHz に設定してください（今はパススルー）"),
+                ST_BAD_RATE,
+                format!(
+                    "OBS の音声が {} です。この値は変換できないためパススルーします",
+                    rate_label(sr)
+                ),
             );
             return false;
         }
@@ -336,6 +359,7 @@ impl FilterData {
         if !cur.is_null()
             && self.engine_channels.load(Ordering::Relaxed) == want
             && self.engine_model.load(Ordering::Relaxed) == want_model.code()
+            && self.engine_rate.load(Ordering::Relaxed) == sr
         {
             return true;
         }
@@ -365,6 +389,7 @@ impl FilterData {
 
         match engine::build(
             want,
+            sr,
             &model,
             &self.resource_dirs,
             Arc::clone(&self.shared.meters),
@@ -372,19 +397,24 @@ impl FilterData {
             Ok(eng) => {
                 let summary = eng.model_summary.clone();
                 let eng_latency = eng.latency_samples;
+                let added_ms = eng.added_latency_ms;
                 let dereverb = eng.dereverb_available;
                 let ptr = Box::into_raw(Box::new(eng));
 
                 let old = self.engine.swap(ptr, Ordering::AcqRel);
                 self.engine_channels.store(want, Ordering::Relaxed);
                 self.engine_model.store(want_model.code(), Ordering::Relaxed);
+                self.engine_rate.store(sr, Ordering::Relaxed);
                 self.shared.dereverb.store(dereverb, Ordering::Relaxed);
                 self.shared.channels.store(want, Ordering::Relaxed);
+                self.shared.rate.store(sr, Ordering::Relaxed);
 
                 // 実機検証用のダンプ（`DPDFNET_DUMP` 未設定なら何もしない）。
+                // 中身は OBS が見ているレートのまま（= 変換前後）なので、
+                // WAV のヘッダにも実際のレートを書く。
                 if let Ok(mut g) = self.dump.lock() {
                     if g.is_none() {
-                        *g = Dump::from_env(OBS_SR);
+                        *g = Dump::from_env(sr);
                     }
                 }
 
@@ -401,17 +431,24 @@ impl FilterData {
                 self.set_status_detail(
                     ST_OK,
                     format!(
-                        "48 kHz / ch={want} / latency {} samples / {summary}",
-                        eng_latency
+                        "{} / ch={want} / latency {} samples ({:.0} ms) / {summary}",
+                        rate_label(sr),
+                        eng_latency,
+                        eng_latency as f64 / OBS_SR as f64 * 1000.0
                     ),
                 );
                 // パネルに出す 1 行は短く保つ（冗長な詳細は status_detail 側にあり、
                 // ログとプロパティの説明に出る）。旧 VST3 版の
                 // `48 kHz / model loaded (2 outputs)` に相当する。
+                let lat_ms = eng_latency as f64 / OBS_SR as f64 * 1000.0;
+                let src = if added_ms >= 0.05 {
+                    format!(" +SRC {added_ms:.1} ms")
+                } else {
+                    String::new()
+                };
                 self.shared.set_summary(format!(
-                    "{want} ch  ·  48 kHz  ·  遅延 {} samples ({:.0} ms)  ·  dereverb {}  ·  model {}",
-                    eng_latency,
-                    eng_latency as f64 / OBS_SR as f64 * 1000.0,
+                    "{want} ch  ·  {}  ·  遅延 {eng_latency} samples ({lat_ms:.0} ms{src})  ·  dereverb {}  ·  model {}",
+                    rate_label(sr),
                     if dereverb { "あり" } else { "なし" },
                     want_model.as_str()
                 ));
@@ -432,7 +469,9 @@ impl FilterData {
         let old = self.engine.swap(ptr::null_mut(), Ordering::AcqRel);
         self.engine_channels.store(0, Ordering::Relaxed);
         self.engine_model.store(u8::MAX, Ordering::Relaxed);
+        self.engine_rate.store(0, Ordering::Relaxed);
         self.shared.channels.store(0, Ordering::Relaxed);
+        self.shared.rate.store(0, Ordering::Relaxed);
         if !old.is_null() {
             unsafe { drop(Box::from_raw(old)) };
         }
@@ -663,7 +702,7 @@ pub unsafe extern "C" fn get_properties(
         let info = crate::ffi::obs_properties_add_text(
             props,
             c"dpdfnet_info".as_ptr(),
-            c"OBS Noise Suppressor — 48 kHz 専用 / 内容遅延 60 ms".as_ptr(),
+            c"OBS Noise Suppressor — 内容遅延 60 ms / 48 kHz 以外は内部でレート変換".as_ptr(),
             crate::ffi::OBS_TEXT_INFO,
         );
         let status_c = std::ffi::CString::new(status).unwrap_or_default();
@@ -823,7 +862,7 @@ pub unsafe extern "C" fn filter_audio(
         let engine_ptr = fd.engine_ptr();
         if engine_ptr.is_null() {
             // 一度だけ理由を出す。原因切り分けに一番効く
-            // (OBS が 48 kHz でない / モデルが無い / エンジン未構築 等)。
+            // (モデルが無い / 読み込み失敗 / 変換できないレート / 未構築 等)。
             if !fd.passthrough_logged.swap(true, Ordering::Relaxed) {
                 obs_log!(
                     crate::ffi::LOG_WARNING,

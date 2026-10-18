@@ -2,8 +2,12 @@
 //!
 //! 移植元: `PluginProcessor::processBlock` / `runHop` / `updateMeters`。
 //!
-//! 48 kHz 固定。`hop = 480`、内容遅延は 6 hop = 2880 サンプル (60 ms)。
+//! 本体は 48 kHz 固定。`hop = 480`、内容遅延は 6 hop = 2880 サンプル (60 ms)。
 //! この遅延量は移植元の実測値 (`ANALYSIS.md` §13) と同じで、変えてはいけない。
+//!
+//! OBS のレートが 48 kHz 以外のときは、`Engine::process` が入口で 48 kHz へ
+//! 落とし、出口で元のレートへ戻す（`Rack`）。`process_48k` 以下の本体は
+//! レートを知らないので、48 kHz のときの経路は今までと完全に同じ。
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -172,6 +176,152 @@ impl Channel {
     }
 }
 
+/// レート変換一式（OBS のレート ↔ 48 kHz）。48 kHz のときは作らないので、
+/// 通常運用（48 kHz）の経路は今までと 1 サンプルも変わらない。
+struct Rack {
+    /// OBS レート → 48 kHz（チャンネルごと）。
+    up: Vec<super::resample::Stream>,
+    /// 48 kHz → OBS レート（チャンネルごと）。
+    down: Vec<super::resample::Stream>,
+    /// 48 kHz の作業領域。本体はここをその場で書き換える。
+    in48: Vec<Vec<f32>>,
+    /// 48 kHz → OBS レートの出力を受ける作業領域。
+    tail: Vec<Vec<f32>>,
+    /// 前のチャンクから持ち越した出力（入出力を 1:1 に保つための端数）。
+    carry: Vec<Vec<f32>>,
+    carry_len: usize,
+    /// 出力が足りずゼロで埋めたサンプル数（診断用。起動直後以外は 0 のはず）。
+    starved: u64,
+    /// 変換で増える遅延 [ms]。
+    added_ms: f32,
+}
+
+impl Rack {
+    /// 変換段を作る。比が大きすぎるレート（想定外の値）は `None`。
+    fn new(rate: u32, num_channels: usize) -> Option<Rack> {
+        use super::resample::{self, Stream};
+        let internal = INTERNAL_SAMPLE_RATE as u32;
+        let up_c = resample::Coeffs::for_rates(rate, internal)?;
+        let down_c = resample::Coeffs::for_rates(internal, rate)?;
+
+        // 1 チャンク（入力）あたりの 48 kHz サンプル数と、その出力数。
+        let n48 = up_c.max_out(resample::MAX_BLOCK).max(1);
+        let nout = down_c.max_out(n48).max(1);
+        let carry_cap = nout.min(4096).max(64);
+
+        let mut up = Vec::with_capacity(num_channels);
+        let mut down = Vec::with_capacity(num_channels);
+        let mut in48 = Vec::with_capacity(num_channels);
+        let mut tail = Vec::with_capacity(num_channels);
+        let mut carry = Vec::with_capacity(num_channels);
+        for _ in 0..num_channels {
+            up.push(Stream::new(Arc::clone(&up_c)));
+            down.push(Stream::new(Arc::clone(&down_c)));
+            in48.push(vec![0.0; n48]);
+            tail.push(vec![0.0; nout]);
+            carry.push(vec![0.0; carry_cap]);
+        }
+
+        let added_ms = (up_c.delay_in_samples() / f64::from(rate)
+            + down_c.delay_in_samples() / f64::from(internal))
+            * 1000.0;
+
+        Some(Rack {
+            up,
+            down,
+            in48,
+            tail,
+            carry,
+            carry_len: 0,
+            starved: 0,
+            added_ms: added_ms as f32,
+        })
+    }
+
+    fn reset(&mut self) {
+        for s in self.up.iter_mut() {
+            s.reset();
+        }
+        for s in self.down.iter_mut() {
+            s.reset();
+        }
+        self.carry_len = 0;
+    }
+
+    /// 1 チャンクぶん変換する。`buffers` は OBS レートの入出力（同じ領域、
+    /// `offset` から `n` サンプル）。`core` は 48 kHz の本体処理（in-place）。
+    fn step(
+        &mut self,
+        buffers: &[*mut f32],
+        offset: usize,
+        n: usize,
+        num_ch: usize,
+        core: &mut dyn FnMut(&[*mut f32], usize),
+    ) {
+        // 1) OBS レート → 48 kHz
+        let mut k = usize::MAX;
+        for ch in 0..num_ch {
+            // SAFETY: 呼び出し側が `offset + n` サンプル以上の有効な領域を渡す。
+            let src = unsafe { std::slice::from_raw_parts(buffers[ch].add(offset), n) };
+            self.up[ch].push(src);
+            let got = self.up[ch].pull(&mut self.in48[ch]);
+            k = k.min(got);
+        }
+        let k = if k == usize::MAX { 0 } else { k };
+
+        // 2) 48 kHz の本体（in-place）
+        let mut ptrs = [std::ptr::null_mut::<f32>(); 2];
+        for (ch, p) in ptrs.iter_mut().enumerate().take(num_ch) {
+            *p = self.in48[ch].as_mut_ptr();
+        }
+        core(&ptrs[..num_ch], k);
+
+        // 3) 48 kHz → OBS レート
+        //    push/pull は `MAX_BLOCK` 単位で行う（履歴保持の前提を守るため）。
+        let mut k_out = 0usize;
+        let mut pos = 0usize;
+        while pos < k {
+            let m = (k - pos).min(super::resample::MAX_BLOCK);
+            for ch in 0..num_ch {
+                self.down[ch].push(&self.in48[ch][pos..pos + m]);
+            }
+            let mut got = 0usize;
+            for ch in 0..num_ch {
+                got = self.down[ch].pull(&mut self.tail[ch][k_out..]);
+            }
+            k_out += got;
+            pos += m;
+        }
+
+        // 4) 入力と同じ数だけ書き出す（端数は持ち越す）。
+        let avail = self.carry_len + k_out;
+        let take = avail.min(n);
+        let c1 = self.carry_len.min(take);
+        let c2 = take - c1;
+        let left = avail - take;
+        let overflow = left > self.carry.first().map_or(0, Vec::len);
+        for ch in 0..num_ch {
+            // SAFETY: 1) と同じ前提。
+            let out = unsafe { std::slice::from_raw_parts_mut(buffers[ch].add(offset), n) };
+            out[..c1].copy_from_slice(&self.carry[ch][..c1]);
+            out[c1..take].copy_from_slice(&self.tail[ch][..c2]);
+            if take < n {
+                out[take..].iter_mut().for_each(|v| *v = 0.0);
+            }
+            if !overflow && left > 0 {
+                // 旧 carry の残りを先頭へ寄せ、そのうしろに tail の残りを繋ぐ。
+                let rem = self.carry_len - c1;
+                self.carry[ch].copy_within(c1..self.carry_len, 0);
+                self.carry[ch][rem..left].copy_from_slice(&self.tail[ch][c2..c2 + left - rem]);
+            }
+        }
+        if take < n {
+            self.starved += (n - take) as u64;
+        }
+        self.carry_len = if overflow { 0 } else { left };
+    }
+}
+
 pub struct Engine {
     channels: Vec<Channel>,
 
@@ -208,18 +358,36 @@ pub struct Engine {
     pub dereverb_available: bool,
     pub latency_samples: usize,
     pub model_summary: String,
+    /// OBS のレートが 48 kHz 以外のときだけ入るレート変換段。
+    rack: Option<Box<Rack>>,
+    /// レート変換で増える遅延 [ms]（48 kHz のときは 0）。
+    pub added_latency_ms: f32,
 }
 
 /// 音声スレッドで触る前に、UI スレッド（create / activate）で組み立てる。
 ///
 /// `num_channels` は 1 (モノラル) か 2 (ステレオ)。OBS の音声設定に対応する。
+/// `rate` は OBS が動いているサンプルレート。48 kHz 以外なら内部で 48 kHz へ
+/// 変換してから処理する（モデルが 48 kHz 前提のため）。
 pub fn build(
     num_channels: usize,
+    rate: u32,
     model_path: &Path,
     ort_dirs: &[PathBuf],
     meters: Arc<Meters>,
 ) -> Result<Engine, String> {
     let num_channels = num_channels.clamp(1, 2);
+
+    // レート変換段（48 kHz 以外のみ）。作れないレートは呼び出し側で弾く。
+    let rack = if rate == INTERNAL_SAMPLE_RATE as u32 {
+        None
+    } else {
+        match Rack::new(rate, num_channels) {
+            Some(r) => Some(Box::new(r)),
+            None => return Err(format!("未対応のサンプルレート: {rate} Hz")),
+        }
+    };
+    let added_latency_ms = rack.as_ref().map_or(0.0, |r| r.added_ms);
 
     let mut channels = Vec::with_capacity(num_channels);
     for _ in 0..num_channels {
@@ -279,6 +447,8 @@ pub fn build(
         num_channels,
         dereverb_available,
         latency_samples: K_LATENCY_HOPS * hop,
+        rack,
+        added_latency_ms,
         model_summary: format!(
             "{} | n_fft={} hop={} state={} outputs={}",
             model_path
@@ -331,13 +501,61 @@ impl Engine {
         self.meter_in_smoothed = [0.0; 2];
         self.meter_in_peak = [0.0; 2];
         self.meter_out_smoothed = [0.0; 2];
+
+        if let Some(r) = self.rack.as_mut() {
+            r.reset();
+        }
     }
 
     /// その場で `buffers` を書き換える。長さは `num_channels` 以上、各要素は
     /// `frames` サンプル以上の有効な planar f32 バッファ。
     ///
     /// **アロケーションを行わない。**
+    ///
+    /// OBS のレートが 48 kHz のときは 1 サンプルも変換せずそのまま本体へ渡す
+    /// （従来と同じ経路）。それ以外のときは 48 kHz へ変換 → 本体 → 元のレートへ
+    /// 変換、という順に通す。出力サンプル数は入力と同じ。
     pub fn process(&mut self, buffers: &[*mut f32], frames: usize, p: ParamSnapshot) {
+        if frames == 0 || self.channels.is_empty() || self.hop == 0 {
+            return;
+        }
+
+        let num_ch = buffers.len().min(self.channels.len());
+        if num_ch == 0 {
+            return;
+        }
+
+        let Some(mut rack) = self.rack.take() else {
+            self.process_48k(buffers, frames, p);
+            return;
+        };
+
+        // ブロック長は OBS から任意に来るので、想定長で分割して処理する。
+        // 途中でパニックしても変換段を必ず戻す（戻さないと、次のブロックから
+        // 変換前の音を 48 kHz として扱ってしまう）。48 kHz のときは上で
+        // return しているので、ここを通るのはレート変換を使うときだけ。
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let me: &mut Engine = &mut *self;
+            let chunk = super::resample::MAX_BLOCK;
+            let mut done = 0usize;
+            while done < frames {
+                let n = (frames - done).min(chunk);
+                rack.step(buffers, done, n, num_ch, &mut |ptrs, k| {
+                    me.process_48k(ptrs, k, p);
+                });
+                done += n;
+            }
+        }));
+
+        self.rack = Some(rack);
+        if let Err(e) = r {
+            // 外側（`filter_audio`）がログを出してパススルーへ退避する。
+            std::panic::resume_unwind(e);
+        }
+    }
+
+    /// 48 kHz の本体処理（従来からの経路。ここは変換しない）。
+    fn process_48k(&mut self, buffers: &[*mut f32], frames: usize, p: ParamSnapshot) {
         if frames == 0 || self.channels.is_empty() || self.hop == 0 {
             return;
         }
@@ -588,5 +806,60 @@ impl Engine {
             self.smoothed_noisy_weight,
             c.step,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// レート変換段そのものの確認（モデルも ONNX Runtime も要らない。
+    /// `core` は素通しのダミー）。
+    ///
+    /// 見ること:
+    ///   * 出力サンプル数が入力とまったく同じ（OBS の要求）
+    ///   * ゼロ埋め（starved）は起動直後だけで止まる
+    ///   * 定常では直流がそのまま通る（振幅・遅延の辻褄）
+    ///   * 左右のチャンネルが完全に一致する（チャンネル間の状態漏れなし）
+    #[test]
+    fn rack_keeps_sample_counts_and_level() {
+        for rate in [22_050u32, 44_100, 88_200, 96_000, 192_000] {
+            for block in [1usize, 7, 480, 1023, 1024, 4096] {
+                let mut r = Rack::new(rate, 2).expect("変換段が作れない");
+                let n_blocks = (120_000usize / block).max(8);
+                let mut buf = [vec![0.0f32; block], vec![0.0f32; block]];
+                let mut first_starved = 0u64;
+
+                for i in 0..n_blocks {
+                    for b in buf.iter_mut() {
+                        b.iter_mut().for_each(|v| *v = 0.35);
+                    }
+                    let ptrs: [*mut f32; 2] = [buf[0].as_mut_ptr(), buf[1].as_mut_ptr()];
+                    r.step(&ptrs, 0, block, 2, &mut |_, k| assert!(k < 200_000));
+                    if i == 0 {
+                        first_starved = r.starved;
+                    } else {
+                        assert_eq!(
+                            r.starved, first_starved,
+                            "rate={rate} block={block}: 途中でゼロ埋めが再発 (i={i})"
+                        );
+                    }
+                }
+
+                // 起動直後のゼロ埋めは高々 2 ブロックぶん。
+                assert!(
+                    first_starved <= 2 * block as u64,
+                    "rate={rate} block={block}: 起動時のゼロ埋めが多すぎる ({first_starved})"
+                );
+                // 定常: 直流がそのまま出る（変換の誤差は 1% 未満）。
+                for v in buf[0].iter() {
+                    assert!(
+                        (v - 0.35).abs() < 2e-3,
+                        "rate={rate} block={block}: 定常値が違う ({v})"
+                    );
+                }
+                assert_eq!(buf[0], buf[1], "rate={rate} block={block}: L/R が違う");
+            }
+        }
     }
 }

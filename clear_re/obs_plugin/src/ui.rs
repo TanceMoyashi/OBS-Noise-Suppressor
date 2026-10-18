@@ -1162,6 +1162,8 @@ struct Snapshot {
     dereverb: bool,
     /// エンジンのチャンネル数（1 = モノラル / 2 = ステレオ / 0 = 未構築）。
     channels: usize,
+    /// エンジンが想定している OBS のサンプルレート（0 = 未構築）。
+    rate: u32,
     enabled: bool,
     model: ModelChoice,
     /// 埋まっているスロット。
@@ -1857,6 +1859,7 @@ impl Panel {
             flash: self.flash.as_ref().map(|(s, _)| s.clone()),
             dereverb: self.shared.dereverb.load(Ordering::Relaxed),
             channels: self.shared.channels.load(Ordering::Relaxed),
+            rate: self.shared.rate.load(Ordering::Relaxed),
             enabled: if self.shared.alive.load(Ordering::SeqCst) && !self.source.is_null() {
                 unsafe { crate::ffi::obs_source_enabled(self.source as *mut _) }
             } else {
@@ -1958,7 +1961,14 @@ impl Panel {
             );
             draw_text(
                 dc,
-                "NEURAL DE-NOISE  ·  DE-REVERB  ·  48 kHz",
+                &format!(
+                    "NEURAL DE-NOISE  ·  DE-REVERB  ·  {}",
+                    if s.rate > 0 {
+                        crate::filter::rate_label(s.rate)
+                    } else {
+                        "48 kHz".to_string()
+                    }
+                ),
                 IR { t: lay.title.t + sc(19.0), b: lay.title.t + sc(35.0), ..lay.title },
                 fonts.subtitle,
                 SILK_FAINT,

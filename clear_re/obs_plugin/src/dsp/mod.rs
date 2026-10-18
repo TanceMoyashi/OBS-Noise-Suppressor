@@ -5,13 +5,17 @@
 //! と、`PluginProcessor` のホップスケジューラ。JUCE に依存しない設計だったため、
 //! そのまま Rust へ写している。
 //!
-//! 48 kHz 専用。それ以外のサンプルレートではフィルタ側がパススルーする。
+//! モデルは 48 kHz 前提なので、内側は常に 48 kHz で回す。OBS が別のレートで
+//! 動いているときは `resample` が入口と出口で変換する（`engine::build` に
+//! レートを渡すと自動で挟まる）。48 kHz のときは変換段を作らないので、
+//! 従来の経路がそのまま使われる。
 
 pub mod engine;
 pub mod meta;
 pub mod net;
 pub mod ort;
 pub mod params;
+pub mod resample;
 pub mod stft;
 
 #[cfg(test)]

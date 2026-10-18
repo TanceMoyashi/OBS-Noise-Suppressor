@@ -4,8 +4,8 @@
 
 前提:
 
-- OBS の設定 → 音声 → **サンプルレート = 48 kHz**（本プラグインは 48 kHz 専用。
-  それ以外ではパススルー）
+- OBS の設定 → 音声 → **サンプルレート**（48 kHz を推奨。それ以外でも内部で
+  48 kHz へ変換して処理します。変換段を作れない異常値のときだけパススルー）
 - `install.ps1` でインストール済み（`%ProgramData%\obs-studio\plugins\obs_noise_suppressor`）
 
 ---
@@ -101,7 +101,7 @@ cd obs_plugin
 ```text
 [obs-noise-suppressor] module loaded (libobs api 0x20020002, obs_source_info 424 bytes, ort api 17)
 [obs-noise-suppressor] onnxruntime 1.31.0 (...\plugins\obs_noise_suppressor\data\dpdfnet_onnxruntime.dll) を読み込みました
-[obs-noise-suppressor] status: 48 kHz / ch=2 / latency 2880 samples / dpdfnet8_48khz_hr_2out.onnx | n_fft=960 hop=480 state=90228 outputs=2
+[obs-noise-suppressor] status: 48 kHz / ch=2 / latency 2880 samples (60 ms) / dpdfnet8_48khz_hr_2out.onnx | n_fft=960 hop=480 state=90228 outputs=2
 
 実機 lag = 2880 samples (6.000 hop, 60.0 ms) corr = 0.8140 (in_rms 0.114889 out_rms 0.027569)
 参照 vs 実機: 1248640 frames x 2 ch / max diff = 0e0 / diff rms = 0e0
@@ -124,15 +124,17 @@ test result: ok. 1 passed; 0 failed
 
 | 表示 | 意味 |
 | --- | --- |
-| `48 kHz / ch=2 / latency 2880 samples / <model> \| n_fft=… hop=… state=… outputs=2` | ✅ 正常。`outputs=2` なので Voice Reverb が有効 |
-| `48 kHz / ch=1 / latency 2880 samples / …` | ✅ モノラル設定で正常 |
-| `OBS の音声が 44100 Hz です。48 kHz に設定してください（今はパススルー）` | OBS が 48 kHz になっていない（設定 → 音声） |
+| `48 kHz / ch=2 / latency 2880 samples (60 ms) / <model> \| n_fft=… hop=… state=… outputs=2` | ✅ 正常。`outputs=2` なので Voice Reverb が有効 |
+| `48 kHz / ch=1 / latency 2880 samples (60 ms) / …` | ✅ モノラル設定で正常 |
+| `96 kHz / ch=2 / latency 2880 samples (60 ms) / …` | ✅ 48 kHz 以外でも正常（内部でレート変換。パネルには `+SRC 2.4 ms` が出ます） |
+| `OBS の音声が 12345 Hz です。この値は変換できないためパススルーします` | 変換段を作れない異常値（通常は起きません。設定 → 音声） |
 | `DPDFNet モデルが見つかりません (探索先: …)` | `data\models\*.onnx` の配置を確認 |
 | `モデルの読み込みに失敗: …` | モデルが壊れている / ORT と不一致 |
 | `onnxruntime を読み込めません: …` | 同梱 `dpdfnet_onnxruntime.dll` の配置を確認 |
 
 パネルの 1 行表示は `2 ch  ·  48 kHz  ·  遅延 2880 samples (60 ms)  ·  dereverb あり`
-のように短く出ます（詳細はプロパティ側）。
+のように短く出ます（詳細はプロパティ側）。48 kHz 以外ではレートと
+`+SRC x.x ms`（レート変換ぶんの遅延）が付きます。
 
 5. メディアソースの音声メーターが動いていれば DSP が回っています
 6. パネルの GR メーター（抑圧量）と 3 バンドメーターも反応します
@@ -163,7 +165,8 @@ test result: ok. 1 passed; 0 failed
 - CPU 使用率が常識的な範囲に収まること（重ければ `data\models` から
   `dpdfnet8_*.onnx` をどけて dpdfnet2 に落ちる）
 
-マイクで実際に使う場合は、マイクソースに同じフィルタを挿します（48 kHz であること）。
+マイクで実際に使う場合は、マイクソースに同じフィルタを挿します（OBS の音声設定と
+同じサンプルレートで動きます。48 kHz 以外なら内部で変換されます）。
 
 ---
 
@@ -312,3 +315,30 @@ $env:DPDFNET_MODEL = 'D:\...\plugin\models\dpdfnet8_48khz_hr_2out.onnx'
   （ビルド出力・配布 ZIP 内と一致、1,608,192 bytes）
 - 配布 ZIP: `OBS-Noise-Suppressor-0.2.1-win64.zip`（53,420,449 bytes、
   SHA256 `c9ea75c392e3bee5d2ed2603ee7ce68bfe992177b79b28ffbe145d905ad303e1`）
+
+### v0.3.0（レート変換対応 / 2026-10-18）
+
+48 kHz 以外のレートでもパススルーせず、入出力で 48 kHz へ相互変換して処理する版。
+
+> **実機（OBS）での通し確認はこの版では未実施です。** 48 kHz の処理経路は
+> v0.2.1 から 1 サンプルも変えていない（変換段を作らないため）ので、上の
+> v0.2.1 の実機結果（ビット一致・遅延 2880）はそのまま有効です。96 kHz などの
+> 実機確認は、OBS の音声設定を変えて `run_obs_verify.ps1` を回すと取れます。
+
+オフライン検証（`DPDFNET_MODEL=dpdfnet2_48khz_hr_2out.onnx` / `speech_tail_48k.wav`）:
+
+- `offline_rate_conversion_96k`（96 kHz 入力 → 本経路 → 96 kHz 出力）
+  - 出力サンプル数が入力と**完全一致**
+  - 内容遅延 `5989 samples (62.4 ms)` / 期待 `5988`（= 60 ms + 変換 2.4 ms）、相関 `0.9341`
+  - 出力を 48 kHz に戻したものと 48 kHz 版の相関 `0.9981`、相対 RMS 差 `0.061`
+  - 出力レベル: 48 kHz 版 `0.078000` / 96 kHz 版 `0.078040`（差 0.05 %）
+- `rack_keeps_sample_counts_and_level`（モデル不要の変換段単体）
+  - 22.05 / 44.1 / 88.2 / 96 / 192 kHz × ブロック長 1 / 7 / 480 / 1023 / 1024 / 4096 で
+    入出力のサンプル数が一致、ゼロ埋めは起動直後のみ、定常で直流がそのまま通る、L/R 一致
+- 自動テスト: `cargo test --release --lib` → **62 passed / 0 failed**、ビルド警告 0 件
+- 48 kHz の経路は変更なし（変換段を作らないため）。従来の実機検証
+  （`max diff = 0e0` のビット一致・遅延 2880）はそのまま有効。
+- ビルドした DLL: 1,630,208 bytes / SHA256
+  `b3cd81ef56ce02333a2f7bce2af29d066368e4d25603d1ba8483bf896fb95b6f`
+- 配布 ZIP: `OBS-Noise-Suppressor-0.3.0-win64.zip`（53,429,742 bytes、SHA256
+  `f13970ae0f1b5f116f57939ff27bce7c21c7279f581660c5fd71c0d07a191384`）

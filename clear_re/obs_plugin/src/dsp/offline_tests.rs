@@ -337,7 +337,7 @@ fn debug_paths() {
     padded.extend_from_slice(&x);
     let x = padded;
 
-    let mut eng = engine::build(1, &model, std::slice::from_ref(&ort_dir), Arc::new(Meters::new()))
+    let mut eng = engine::build(1, 48_000, &model, std::slice::from_ref(&ort_dir), Arc::new(Meters::new()))
         .expect("build");
     let hop = eng.hop();
 
@@ -396,7 +396,7 @@ fn offline_latency_and_channel_consistency() {
     let block = 1024usize;
 
     // ---- 1 ch ----
-    let mut eng1 = engine::build(1, &model, std::slice::from_ref(&ort_dir), Arc::new(Meters::new()))
+    let mut eng1 = engine::build(1, 48_000, &model, std::slice::from_ref(&ort_dir), Arc::new(Meters::new()))
         .expect("エンジン構築に失敗");
     let hop = eng1.hop();
     assert_eq!(hop, 480, "hop は 480 であること");
@@ -435,7 +435,7 @@ fn offline_latency_and_channel_consistency() {
     );
 
     // ---- 2 ch (同一入力を 2 回) ----
-    let mut eng2 = engine::build(2, &model, std::slice::from_ref(&ort_dir), Arc::new(Meters::new()))
+    let mut eng2 = engine::build(2, 48_000, &model, std::slice::from_ref(&ort_dir), Arc::new(Meters::new()))
         .expect("ステレオエンジン構築に失敗");
     let stereo_in = vec![x.clone(), x.clone()];
     let y2 = run_stream(&mut eng2, &stereo_in, block, params);
@@ -460,7 +460,7 @@ fn offline_latency_and_channel_consistency() {
     assert!(max_diff_lr <= 1e-6, "L/R が独立していない (max diff {max_diff_lr})");
 
     // ---- 決定性 ----
-    let mut eng3 = engine::build(1, &model, std::slice::from_ref(&ort_dir), Arc::new(Meters::new()))
+    let mut eng3 = engine::build(1, 48_000, &model, std::slice::from_ref(&ort_dir), Arc::new(Meters::new()))
         .expect("エンジン再構築に失敗");
     let y3 = run_stream(&mut eng3, std::slice::from_ref(&x), block, params);
     let max_diff3 = y1[0]
@@ -541,6 +541,7 @@ fn live_dump_matches_reference() {
     let ch_used = ch.clamp(1, 2);
     let mut eng = engine::build(
         ch_used,
+        48_000,
         &model,
         std::slice::from_ref(&ort_dir),
         Arc::new(Meters::new()),
@@ -577,5 +578,133 @@ fn live_dump_matches_reference() {
     assert!(
         max_diff < 1e-4,
         "実機の出力がオフライン参照と一致しない (max diff {max_diff:e})"
+    );
+}
+
+/// 係数を使って信号全体を変換する（テスト用。ブロック単位で流す）。
+fn resample_all(c: &Arc<super::resample::Coeffs>, x: &[f32]) -> Vec<f32> {
+    let mut s = super::resample::Stream::new(Arc::clone(c));
+    let block = 1024usize;
+    let mut out = Vec::with_capacity(x.len() * 4 + 16);
+    let mut tmp = vec![0.0f32; c.max_out(block)];
+    for chunk in x.chunks(block) {
+        s.push(chunk);
+        let k = s.pull(&mut tmp);
+        out.extend_from_slice(&tmp[..k]);
+    }
+    out
+}
+
+/// 48 kHz 以外（ここでは 96 kHz）でもレート変換を挟んで正しく動くこと。
+///
+/// 確認すること:
+///   1. 出力サンプル数が入力とまったく同じ（OBS の要求）
+///   2. 内容遅延 = 60 ms + 変換段の遅延
+///   3. 96 kHz で処理した結果を 48 kHz に戻すと、48 kHz 版とほぼ一致する
+#[test]
+fn offline_rate_conversion_96k() {
+    let Some(ort_dir) = env_path("DPDFNET_ORT") else {
+        eprintln!("skip: DPDFNET_ORT が未設定");
+        return;
+    };
+    let Some(model) = env_path("DPDFNET_MODEL") else {
+        eprintln!("skip: DPDFNET_MODEL が未設定");
+        return;
+    };
+    let Some(wav) = find_test_wav() else {
+        eprintln!("skip: テスト用 WAV が見つからない");
+        return;
+    };
+
+    let (mut x48, sr) = read_wav_mono(&wav).expect("WAV 読み込み失敗");
+    assert_eq!(sr, 48_000);
+    let pad = (0.2 * sr as f64) as usize;
+    x48.truncate(3 * sr as usize);
+    let mut padded = vec![0.0f32; pad];
+    padded.extend_from_slice(&x48);
+    let x48 = padded;
+
+    // 96 kHz の入力を「48 kHz 版を 2 倍に上げたもの」として作る
+    // （24 kHz までしか帯域がないので、48 kHz に戻すと元に戻る信号）。
+    let up_c = super::resample::Coeffs::for_rates(48_000, 96_000).expect("係数");
+    let x96 = resample_all(&up_c, &x48);
+    assert!(x96.len() >= x48.len() * 2 - 2);
+
+    let params = engine::ParamSnapshot::default();
+
+    let mut eng48 = engine::build(
+        1,
+        48_000,
+        &model,
+        std::slice::from_ref(&ort_dir),
+        Arc::new(Meters::new()),
+    )
+    .expect("48 kHz エンジン構築に失敗");
+    assert_eq!(eng48.added_latency_ms, 0.0);
+    let y48 = run_stream(&mut eng48, std::slice::from_ref(&x48), 1024, params);
+
+    let mut eng96 = engine::build(
+        1,
+        96_000,
+        &model,
+        std::slice::from_ref(&ort_dir),
+        Arc::new(Meters::new()),
+    )
+    .expect("96 kHz エンジン構築に失敗");
+    assert!(eng96.added_latency_ms > 0.0);
+    let y96 = run_stream(&mut eng96, std::slice::from_ref(&x96), 1024, params);
+
+    // 1) サンプル数が増減しない（OBS は同じ数を要求する）。
+    assert_eq!(
+        y96[0].len(),
+        x96.len(),
+        "96 kHz で出力サンプル数が入力と違う"
+    );
+
+    // 2) 遅延 = 60 ms + 変換段の遅延。
+    let want_ms = eng96.latency_samples as f64 / 48_000.0 * 1000.0
+        + f64::from(eng96.added_latency_ms);
+    let want_lag = (want_ms * 96.0).round() as i64;
+    let (lag, corr) = estimate_lag(&x96, &y96[0], 24_000, 16);
+    eprintln!(
+        "96 kHz: lag = {lag} samples ({:.1} ms) / 期待 {want_lag} ({want_ms:.1} ms) corr = {corr:.4}",
+        lag as f64 / 96_000.0 * 1000.0
+    );
+    assert!(corr > 0.3, "相関が低すぎる ({corr})");
+    assert!(
+        (lag as i64 - want_lag).abs() <= 4,
+        "96 kHz の遅延が {want_lag} 付近でない (実測 {lag})"
+    );
+
+    // 3) 96 kHz の出力を 48 kHz に戻して 48 kHz 版と比べる。
+    let dn_c = super::resample::Coeffs::for_rates(96_000, 48_000).expect("係数");
+    let y96_48 = resample_all(&dn_c, &y96[0]);
+    let n = y48[0].len().min(y96_48.len());
+    let (lag2, corr2) = estimate_lag(&y48[0][..n], &y96_48[..n], 600, 1);
+    eprintln!("48 kHz 版 vs 96 kHz→48 kHz: lag = {lag2} corr = {corr2:.4}");
+    assert!(corr2 > 0.9, "48 kHz 版と波形が合わない (corr {corr2})");
+
+    let mut diff_sq = 0.0f64;
+    let mut ref_sq = 0.0f64;
+    let from = 4_000usize;
+    let to = n.saturating_sub(lag2);
+    for i in from..to {
+        let a = y48[0][i] as f64;
+        let b = y96_48[i + lag2] as f64;
+        diff_sq += (a - b) * (a - b);
+        ref_sq += a * a;
+    }
+    let rel = (diff_sq / ref_sq.max(1e-12)).sqrt();
+    eprintln!("48 kHz 版との相対 RMS 差 = {rel:.5}");
+    assert!(rel < 0.20, "48 kHz 版と一致しない (相対 RMS {rel})");
+
+    // 4) 抑圧が効いていること（素通しではない）。48 kHz 版と同程度まで下がる。
+    let r48 = rms(&y48[0]);
+    let r96 = rms(&y96[0]);
+    eprintln!("out_rms: 48 kHz = {r48:.6} / 96 kHz = {r96:.6} (in_rms {:.6})", rms(&x48));
+    assert!(r96 > 1e-5, "96 kHz の出力が無音");
+    assert!(
+        (r96 / r48 - 1.0).abs() < 0.5,
+        "96 kHz と 48 kHz で出力レベルが違いすぎる ({r96} vs {r48})"
     );
 }

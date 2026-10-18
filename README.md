@@ -27,7 +27,7 @@ ONNX Runtime と DPDFNet モデルを同梱した Windows x64 版で、追加の
 >   「検証した範囲では正しい」という意味にすぎません。
 > - **本番で使う前に自分で確かめてください。** 配信・録音・業務など重要な用途では、
 >   事前に自分の環境でテストし、必要なら検証・修正してください。特に
->   **60 ms 固定の遅延**と **48 kHz 専用**（それ以外はパススルー）という前提が
+>   **60 ms 固定の遅延**（＋レート変換ぶん数 ms）という前提が
 >   用途に合うかを確認してください。
 > - **権利関係も保証できません。** AI が生成したコードが第三者の著作権を侵害しない
 >   ことを保証できません。再配布・商用利用の前に各自で確認してください。同梱の
@@ -39,9 +39,9 @@ ONNX Runtime と DPDFNet モデルを同梱した Windows x64 版で、追加の
 
 | 項目 | 内容 |
 | --- | --- |
-| サンプルレート | **48 kHz 専用**。それ以外のレートではパススルー（音は素通し） |
+| サンプルレート | **44.1 / 48 / 88.2 / 96 / 176.4 / 192 kHz など**。48 kHz 以外は入出力でレート変換して内部 48 kHz で処理（変換段を作れない異常値のみパススルー） |
 | チャンネル | モノラル → モノラル / ステレオ → ステレオ（OBS の音声設定に追従） |
-| 内容遅延 | **2880 サンプル = 60 ms 固定**（`kLatencyHops = 6` × hop 480。VST3 版と同一） |
+| 内容遅延 | **2880 サンプル = 60 ms 固定**（`kLatencyHops = 6` × hop 480。VST3 版と同一）。48 kHz 以外ではレート変換ぶん（約 2〜5 ms）が加算 |
 | 推論 | 同梱の ONNX Runtime 1.31.0（`dpdfnet_onnxruntime.dll`）+ DPDFNet モデル 4 つ |
 | モデル選択 | OBS プロパティで **自動 / 高品質 (dp8) / 軽量 (dp2)** を選択 |
 | UI | 自前の Win32/GDI パネル（入力 VU 2 本 + 縦フェーダー 3 本 + GR / 3 バンドメーター） |
@@ -85,14 +85,15 @@ OBS のプロパティにある **「パネルを開く（フェーダー / メ�
 ## 動作要件
 
 - OBS Studio 28 以降 / Windows x64（検証は 32.2.2）
-- OBS の音声設定が **48 kHz**（設定 → 音声 → サンプルレート）
+- OBS の音声設定は **44.1 / 48 / 88.2 / 96 / 176.4 / 192 kHz** など（48 kHz 以外は
+  内部で 48 kHz に変換して処理します。変換段を作れない異常値のときだけパススルー）
 
 ## ビルド
 
 ```powershell
 cd clear_re\obs_plugin
 .\build.ps1                 # cargo build --release（配布する DLL）
-.\build.ps1 -Tests          # cargo test --release --lib（38 テスト）
+.\build.ps1 -Tests          # cargo test --release --lib（62 テスト）
 .\tools\make_package.ps1    # 配布パッケージ (dist\) と ZIP を作る
 .\tools\run_obs_verify.ps1  # OBS を実際に回して遅延と DSP を数値で確認する
 ```
@@ -129,8 +130,13 @@ ONNX Runtime とモデルは `vendor/` と `clear_re/plugin/models/` に入っ�
 
 - OBS Studio 32.2.2 / Windows x64 / ONNX Runtime 1.31.0（`ORT_API_VERSION = 17`）
 - 実機 vs オフライン参照が**ビット一致**（1,260,928 frames × 2 ch / 最大差 `0e0`）
-- 遅延 `2880 samples (6.000 hop, 60.0 ms)` 固定
-- `cargo test --release --lib` → **54 passed / 0 failed**、ビルド警告 0 件
+- 遅延 `2880 samples (6.000 hop, 60.0 ms)` 固定（48 kHz）
+- 48 kHz 以外も**レート変換して処理**（オフライン検証: 96 kHz で出力レベル差 0.05 %、
+  遅延 5989 サンプル = 62.4 ms = 60 ms + 変換 2.4 ms。`offline_rate_conversion_96k`）
+- レート変換段の単体検証: 22.05 / 44.1 / 88.2 / 96 / 192 kHz と 6 種類のブロック長
+  （1 / 7 / 480 / 1023 / 1024 / 4096）で入出力のサンプル数が一致し、定常で直流が
+  そのまま通る（`rack_keeps_sample_counts_and_level`）
+- `cargo test --release --lib` → **62 passed / 0 failed**、ビルド警告 0 件
 
 ## ログ
 
@@ -145,9 +151,16 @@ OBS 標準のログ（`%APPDATA%\obs-studio\logs\*.txt`）にも同じ内容が�
 2026-10-18 04:23:09.949 [INFO] OBS Noise Suppressor v0.2.1 を読み込みました
 2026-10-18 04:23:09.949 [INFO] dll: C:\ProgramData\obs-studio\plugins\obs_noise_suppressor\bin\64bit
 2026-10-18 04:23:10.066 [INFO] filter created (ambience 0.50, voice 0.00 dB, reverb 0.00)
-2026-10-18 04:23:10.365 [INFO] status: 48 kHz / ch=2 / latency 2880 samples / dpdfnet8_48khz_hr_2out.onnx
+2026-10-18 04:23:10.365 [INFO] status: 48 kHz / ch=2 / latency 2880 samples (60 ms) / dpdfnet8_48khz_hr_2out.onnx
 2026-10-18 04:23:36.659 [INFO] filter destroyed
 ```
+
+OBS の音声を 48 kHz 以外にしているときは、実レートと変換の遅延が出ます
+（例: `status: 96 kHz / ch=2 / latency 2880 samples (60 ms) / …`。パネルの 1 行も
+`2 ch · 96 kHz · 遅延 2880 samples (60 ms +SRC 2.4 ms) · …` になります）。
+
+（上のログは v0.2.1 の実測そのままです。バージョンの行だけは、読み込んだ版によって
+`OBS Noise Suppressor v0.3.0 を読み込みました` のように変わります）。
 
 記録するのは `ERROR` / `WARNING` / `INFO` の 3 段（`LOG_DEBUG` は OBS 標準ログだけ）で、
 起動時の構成（バージョン / ONNX Runtime の版とパス / 読み込んだ DLL / 使ったモデル /

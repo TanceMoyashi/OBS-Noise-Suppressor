@@ -411,10 +411,10 @@ if ($Packaged) {
         id               = "obs-noise-suppressor"
         name             = $ModuleName
         display_name     = $AppName
-        version          = "0.2.1"
+        version          = "0.3.0"
         os_arch          = "win64"
         description      = "Neural speech enhancement (denoise / dereverb) audio filter"
-        long_description = "OBS Noise Suppressor - OBS native audio filter (Rust). ONNX Runtime based neural noise suppression and dereverberation (DPDFNet models) for microphone sources, 48 kHz, 6-hop (2880 sample) algorithmic latency."
+        long_description = "OBS Noise Suppressor - OBS native audio filter (Rust). ONNX Runtime based neural noise suppression and dereverberation (DPDFNet models) for microphone sources. Any sample rate (44.1-192 kHz; resampled to 48 kHz internally), 6-hop (2880 sample = 60 ms) algorithmic latency at 48 kHz."
         urls             = [ordered]@{ repository = ""; website = ""; support = "" }
         has_banner       = $false
         has_icon         = $false

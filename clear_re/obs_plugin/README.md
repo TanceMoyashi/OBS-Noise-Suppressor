@@ -20,9 +20,9 @@ JUCE 非依存だった VST3 版のコードをそのまま移植しています
 
 | 項目 | 内容 |
 | --- | --- |
-| サンプルレート | **48 kHz 専用**。それ以外のレートではパススルー（音は素通し） |
+| サンプルレート | **44.1 / 48 / 88.2 / 96 / 176.4 / 192 kHz など**。48 kHz 以外は入出力でレート変換（有理比ポリフェーズ）して内部 48 kHz で処理。変換段を作れない異常値のみパススルー |
 | チャンネル | OBS の音声設定に追従（モノラル → モノラル、ステレオ → ステレオ） |
-| 内容遅延 | **2880 サンプル = 60 ms 固定**（`kLatencyHops = 6` × hop 480。VST3 版と同一） |
+| 内容遅延 | **2880 サンプル = 60 ms 固定**（`kLatencyHops = 6` × hop 480。VST3 版と同一）。48 kHz 以外は変換段のぶん約 2〜5 ms 加算 |
 | 推論 | 同梱の ONNX Runtime 1.31.0（`dpdfnet_onnxruntime.dll`） |
 | UI | 自前の Win32/GDI パネル（入力 VU 2 本 + 縦フェーダー 3 本 + GR / 3 バンドメーター + メモリー 1〜8 + BYPASS） |
 | モデル | プロパティで 自動 / 高品質 (dp8) / 軽量 (dp2) を選択（切り替えは数十 ms の無音） |
@@ -41,7 +41,8 @@ JUCE 非依存だった VST3 版のコードをそのまま移植しています
 ## 動作要件
 
 - OBS Studio 32.x（`obs64.exe`）
-- OBS の音声設定が **48 kHz**（設定 → 音声 → サンプルレート）
+- OBS の音声設定は **44.1 / 48 / 88.2 / 96 / 176.4 / 192 kHz** など（48 kHz 以外は
+  内部で 48 kHz にレート変換して処理。変換段を作れない異常値のときだけパススルー）
 - `dpdfnet_onnxruntime.dll`（同梱）と DPDFNet モデル（`*.onnx`）
 - ビルドする場合のみ: Rust (MSVC ツールチェーン) + Visual Studio の C++ ビルドツール
 
@@ -191,7 +192,7 @@ dist\OBS-Noise-Suppressor\
   ここを変えると **VU の目盛り全体（−20 〜 +3 VU）が対応する dBFS ごと
   平行移動**します（針の位置も一緒に変わります）。
 
-プロパティの説明欄には、現在の状態（48 kHz / チャンネル数 / 遅延 / モデル名）が
+プロパティの説明欄には、現在の状態（サンプルレート / チャンネル数 / 遅延 / モデル名）が
 そのまま出ます。困ったときはまずここを見てください。
 
 ### パネル（自前 Win32 UI）
@@ -217,6 +218,10 @@ dist\OBS-Noise-Suppressor\
 | ● 2 ch · 48 kHz · 遅延 2880 samples (60 ms) · dereverb あり  MODEL DP8  [BYPASS] |
 +-----------------------------------------------------------------------+
 ```
+
+上の絵は 48 kHz のときのものです。OBS のレートが違うときは、見出しと最下段が
+`96 kHz` のようになり、遅延に変換ぶんが足されます
+（例: `2 ch · 96 kHz · 遅延 2880 samples (60 ms +SRC 2.4 ms) · …`）。
 
 - **INPUT**: 入力 L / R の**アナログ VU メーター**（針 + VU 目盛り）。
   VU は平均値メーターなので 300 ms 程度の緩やかな動きです（実機準拠、行き過ぎなし）。
@@ -275,7 +280,9 @@ dist\OBS-Noise-Suppressor\
 
 ### 遅延について
 
-内容遅延は **2880 サンプル（48 kHz で 60 ms）** で固定です。
+内容遅延は **2880 サンプル（48 kHz で 60 ms）** で固定です。OBS のレートが
+48 kHz 以外のときは、入出力のレート変換ぶん（約 2〜5 ms）がこれに加算されます
+（例: 96 kHz で 62.4 ms）。
 OBS には音声フィルタ用の汎用遅延補正がないため、同じシーンでフィルタ無しの
 ソースと混ぜると 60 ms ずれて聞こえます。マイク 1 本を通すだけの使い方
 （自分の声を直接モニターしない）なら実害はありません。
@@ -290,7 +297,8 @@ OBS には音声フィルタ用の汎用遅延補正がないため、同じシ�
 %APPDATA%\obs-studio\plugin_config\obs_noise_suppressor\obs_noise_suppressor.log
 ```
 
-実際の中身（このマシンで OBS に音を 25 秒流した例。パネルを開いたときの行は省略）:
+実際の中身（このマシンで OBS に音を 25 秒流した例。v0.2.1 時点の記録。
+パネルを開いたときの行は省略）:
 
 ```text
 2026-10-18 04:23:09.949 [INFO] OBS Noise Suppressor v0.2.1 を読み込みました
@@ -299,7 +307,7 @@ OBS には音声フィルタ用の汎用遅延補正がないため、同じシ�
 2026-10-18 04:23:09.949 [INFO] log file: C:\Users\<user>\AppData\Roaming\obs-studio/plugin_config/obs_noise_suppressor/obs_noise_suppressor.log
 2026-10-18 04:23:10.066 [INFO] filter created (ambience 0.50, voice 0.00 dB, reverb 0.00)
 2026-10-18 04:23:10.085 [INFO] onnxruntime 1.31.0 (…\plugins\obs_noise_suppressor\data\dpdfnet_onnxruntime.dll) を読み込みました
-2026-10-18 04:23:10.365 [INFO] status: 48 kHz / ch=2 / latency 2880 samples / dpdfnet8_48khz_hr_2out.onnx | n_fft=960 hop=480 state=90228 outputs=2
+2026-10-18 04:23:10.365 [INFO] status: 48 kHz / ch=2 / latency 2880 samples (60 ms) / dpdfnet8_48khz_hr_2out.onnx | n_fft=960 hop=480 state=90228 outputs=2
 2026-10-18 04:23:36.659 [INFO] filter destroyed
 2026-10-18 04:23:37.159 [INFO] module unloaded
 ```
@@ -341,6 +349,7 @@ obs_plugin/
       net.rs                   ONNX Runtime セッション（IoBinding、事前確保バッファ）
       ort.rs                   同梱 ONNX Runtime の動的ロード
       stft.rs                  Vorbis 窓の STFT（完全再構成）
+      resample.rs              48 kHz 以外のための有理比ポリフェーズ変換（内部 48 kHz）
       meta.rs                  モデルメタデータの検証
       params.rs                パラメータ定義
       offline_tests.rs         OBS を起動しない検証（遅延・一致・決定性）
