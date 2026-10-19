@@ -259,26 +259,63 @@ dp2 の実測内訳（`tools/dpdfnet_mid/parity_state_segments.py` の出力）:
 
 現状手元の音声は `clear_re/plugin/test_signals/` の 3.6 MB のみだったので追加取得した。
 
+### 6.1 取得したデータ（2026-10-20 更新: 実ノイズを追加）
+
 | データ | 用途 | サイズ | ライセンス |
 |---|---|---|---|
-| LibriSpeech dev-clean (OpenSLR SLR12, `dev-clean.tar.gz`) | クリーン音声 | 338 MB (0.3 GB) | **CC BY 4.0** (Panayotov et al. 2015) |
-| LibriSpeech dev-clean を 48 kHz にデコードしたもの (`speech_48000.f32` + `.json`) | 学習時のランダム窓 | 1.39 GB / 1016 発話 / 2.00 時間（`prepare_data.py` の出力） | 同上（派生物） |
+| LibriSpeech dev-clean (OpenSLR SLR12, `dev-clean.tar.gz`) | クリーン音声（**学習用**） | 338 MB / 2.00 時間 / 1016 発話 | **CC BY 4.0** (Panayotov et al. 2015) |
+| LibriSpeech **test-clean** (`test-clean.tar.gz`) | クリーン音声（**評価専用**。学習には一切使わない） | 346 MB 中 0.70 時間 / 287 発話を切り出し | **CC BY 4.0** |
+| **MUSAN** の noise 部分 (OpenSLR SLR17) | 実ノイズ（学習 80 % / 評価 20 %） | 585 MB（noise のみ）/ 5.07 時間 / 757 ファイル → raw 3.51 GB | **CC BY 4.0** (Snyder et al. 2015) |
 | `test_signals/rir_48k.wav` | 残響オーギュメント | 既存 | リポジトリ内 |
+| 合成 RIR（指数減衰 + 初期反射 1〜4 本） | 残響オーギュメント | 生成 | — |
 
-ノイズは**合成**した（白色 / ピンク / ブラウン / ハム (50/60 Hz 高調波) / バブル (LibriSpeech
-の他発話を重ねる) / 非定常 (街頭風の振幅変調) / クリック）。理由:
+デコード済みキャッシュ（`build/dpdfnet_train/`、いずれも `.gitignore` 済み）:
 
-* MUSAN (11 GB) / DNS-Challenge (数十 GB) は今回の作業時間とレート制限に対して大きすぎる。
-* **蒸留では教師 (dp8) の出力が目標**なので、教師が見たことのある実ノイズ分布を完全に覆う
-  必要は薄い。学習の目的は「4 ブロックでも同じ `emb` を作れるようにする」ことで、
-  入力の多様性はそこそこあれば足りる。
+| ファイル | 中身 |
+|---|---|
+| `speech_48000.f32` + `.json` | dev-clean 1016 発話 / 2.00 h（学習） |
+| `test_speech_48000.f32` + `.json` | test-clean 287 発話 / 0.70 h（評価。**学習に未使用**） |
+| `noise_48000.f32` + `.json` | MUSAN noise 757 ファイル / 5.07 h（`names` / `lengths` / `eval_indices` 付き） |
 
-**次の改善（時間ができたら）**: MUSAN の noise subset と DNS-Challenge の noise を足す。
-手順は `prepare_data.py` の後に `distill.py` の `NOISE_KINDS` に実ファイル読み込みを
-足すだけ（`build_batch()` の `make_noise()` を差し替える）。
+### 6.2 なぜ MUSAN にしたか（候補の比較）
+
+| 候補 | サイズ | ライセンス | 判断 |
+|---|---|---|---|
+| **MUSAN noise**（採用） | **585 MB**（noise 部分だけ取得） | **CC BY 4.0** | 採用。6 種類の環境音・技術音を含み、プラグイン (Apache-2.0) に派生を入れやすい |
+| ESC-50 | 約 600 MB | **CC BY-NC 3.0（非商用）** | 見送り。製品に載せる可能性があるため NC は避けた（ESC-10 だけなら CC BY） |
+| MUSAN 全体 | 11 GB | CC BY 4.0 | 見送り。music/speech は不要で、回線が細い（実測 0.3〜0.5 MB/s） |
+| DNS-Challenge noise | 数十 GB | 独自（CC BY 4.0 が多い） | 見送り。サイズと時間が厳しい |
+| DEMAND | 数 GB | CC BY-SA 4.0 | 見送り。16 kHz のみで今回の MUSAN と同条件になるため優先度低 |
+
+**入手元**: MUSAN 本体は <https://www.openslr.org/17/>。今回は Hugging Face のミラー
+`FluidInference/musan` の `noise/**` だけを取得した（`prepare_noise.py --download`、
+`huggingface_hub.snapshot_download`）。元コーパスのライセンスは CC BY 4.0 で、
+`noise/free-sound/` と `noise/sound-bible/` には**クリップ単位の帰属表示**
+（Attribution 3.0 / Public Domain）が同梱されている。ミラーを使ったのは
+11 GB の tar を丸ごと落とさずに noise 部分（585 MB）だけ取るため。
+
+**既知の制約（正直に）**: MUSAN の wav は **16 kHz** なので、48 kHz へアップサンプリング
+すると **8 kHz より上に成分がない**。実際の環境音は 8〜20 kHz にも成分を持つため、
+高域のノイズ（サー音・ヒス・風切り）への耐性はこのデータでは検証できない。
+評価側でも同じ制約があるので、**dp2 / dp4 / dp8 の相対比較には影響しない**が、
+絶対値は実環境より甘めに出る可能性がある。
+
+### 6.3 ノイズの合成と実ノイズの混ぜ方
+
+`distill.py` は 1 サンプルごとに
+
+1. 確率 `--real-noise-p`（既定 0.6）で **MUSAN の train split** からランダム窓を取る
+2. それ以外は従来の合成ノイズ（白色 / ピンク / ブラウン / ハム / バブル / 街頭風 / クリック）
+3. どちらも RMS 1 に正規化してから、指定 SNR（-5〜15 dB）でクリーン音声に混ぜる
+
+**評価用の分離**: `noise_48000.json` の `eval_indices`（ファイル名の sha1 で決まる 20 %、
+163 ファイル / 61 分）は学習で**一度も使わない**。学習は train split（594 ファイル）のみ。
+評価用クリーン音声も **test-clean**（dev-clean とは別コーパス）にしてあるので、
+§7.10 の比較は「dp4 が学習で見ていない音声 + ノイズ」で行われている。
 
 `prepare_data.py` はダウンロード・展開・48 kHz デコード（mono / DC 除去 / ピーク 0.9）まで
 行い、1 本の raw float32 と index (`.json`) を `build/dpdfnet_train/` に作る。
+`prepare_noise.py` も同じ形式（`--download` で取得、`--hours` で上限）。
 
 ---
 
@@ -442,6 +479,38 @@ torch (上流実装) と公式 ONNX は dp2 / dp8 ともに **t=0 でビット�
 **未達 / 改善余地**: 「dp8 に近い品質」という目標に対しては、
 **LibriSpeech（蒸留に使った分布）では dp2 を上回り、プラグイン付属の実録音では 2.2 dB 劣る**。
 学習データの分布がそのまま効いている。改善案は §8.3。
+
+### 7.10 品質 (4) 知覚指標 × 実ノイズ（ホールドアウト）
+
+`tools/dpdfnet_mid/perceptual_report.py`。**SNR 系だけでは dp2 と dp4 の優劣が決まらない**
+（§7.3 はどれも +9.2〜+9.5 dB に飽和する）ため、知覚指標を足した。
+
+* クリーン音声: **LibriSpeech test-clean**（dev-clean = 学習用とは別コーパス。未学習）
+* ノイズ: **MUSAN の eval split**（`eval_indices`、学習では未使用）
+* 条件: test-clean の長い 4 発話 × 8 秒 × SNR {-5, 0, +5, +10} dB × ランダムなノイズファイル = **16 条件**
+* 指標: SI-SDR / STOI / PESQ-WB（16 kHz に落として測定）/ セグメンタル SNR / 出力 SNR / dp8 との一致
+
+#### 7.10.1 更新前（旧 dp4 = 合成ノイズだけで蒸留したモデル）
+
+| モデル | SI-SDR [dB] | STOI | PESQ-WB | segSNR [dB] | 出力 SNR [dB] | dp8 一致 [dB] |
+|---|---|---|---|---|---|---|
+| dp2 | **5.93** | **0.947** | **2.58** | **11.44** | **6.25** | 21.32 |
+| dp4（旧） | 4.19 | 0.916 | 2.10 | 9.26 | 4.85 | 14.67 |
+| dp8 | 5.84 | 0.948 | 2.58 | 11.45 | 6.18 | — |
+
+SNR 別の SI-SDR [dB]:
+
+| 入力 SNR | dp2 | dp4（旧） | dp8 |
+|---|---|---|---|
+| -5 dB | -0.17 | -1.17 | **1.43** |
+| 0 dB | **6.56** | 4.71 | 5.51 |
+| +5 dB | **8.58** | 6.79 | 8.27 |
+| +10 dB | **8.73** | 6.42 | 8.14 |
+
+**この時点の結論（重要）**: 実ノイズでは **dp4 は dp2 に明確に劣る**
+（SI-SDR で 1.7 dB、STOI で 0.031、PESQ で 0.48 低い）。§7.4 の「dp8 一致で 2.2 dB 負け」と
+同じ向きで、**§7.3 の「dp4 が dp2 を上回る」は合成ノイズ分布に固有の結果**だったと判断できる。
+ユーザーの指摘（SNR だけでは決められない）は正しく、指標を変えたことで結論が反転した。
 
 ---
 
