@@ -2477,9 +2477,7 @@ unsafe fn stroke_arc(dc: HDC, cx: f32, cy: f32, rad: f32, a0: f32, a1: f32, colo
     let _ = DeleteObject(pen);
 }
 
-/// DIB の中身を 32 bit BMP として書き出す（`DPDFNET_SNAPSHOT_DIR` 指定時の
-/// テスト専用）。
-#[cfg(test)]
+/// DIB の中身を 32 bit BMP として書き出す（検証用の画像ダンプ）。
 pub(crate) fn write_bmp(dib: &Dib, path: &std::path::Path) -> std::io::Result<()> {
     let (w, h) = (dib.w, dib.h);
     let pix = (w * h * 4) as u32;

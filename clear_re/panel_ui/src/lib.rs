@@ -67,6 +67,10 @@ pub const TIMER_MS: u32 = 40;
 /// メモリー操作のメッセージを出しておく時間 [ms]。
 const FLASH_MS: u64 = 1800;
 
+/// 検証用のパネル画像（`DPDFNET_PANEL_SNAPSHOT`）を書くまでに待つ時間 [ms]。
+/// 音が流れてメーターが動いてから撮るため。
+const DUMP_AFTER_MS: u64 = 5000;
+
 // --------------------------------------------------------------------------
 // ホストとの境目
 // --------------------------------------------------------------------------
@@ -368,6 +372,10 @@ pub struct Panel {
     last_status_text: String,
     last_summary: String,
     last_flash: Option<String>,
+
+    /// 検証用の画像ダンプ: パネルを作った時刻と、もう書いたか。
+    opened_at_ms: u64,
+    dumped: bool,
 }
 
 // `HWND` / `HFONT` などは生ポインタを含むので `Send` でない。ウィンドウを
@@ -439,6 +447,8 @@ impl Panel {
             last_status_text: String::new(),
             last_summary: String::new(),
             last_flash: None,
+            opened_at_ms: unsafe { GetTickCount64() },
+            dumped: false,
         });
         let param = Box::into_raw(panel);
 
@@ -569,6 +579,7 @@ impl Panel {
                 self.flash = None;
             }
         }
+        self.maybe_dump(now_ms);
         if self.needs_repaint() {
             self.invalidate();
         }
@@ -724,8 +735,8 @@ impl Panel {
         }
     }
 
-    /// DIB に描いて `target` へ転送する。
-    fn blit(&mut self, target: HDC) {
+    /// DIB に今の内容を描く（ウィンドウへは転送しない）。
+    fn render(&mut self) {
         if self.dib.is_some() && self.fonts.is_some() {
             let snap = self.snapshot();
             let dib = self.dib.as_mut();
@@ -735,6 +746,11 @@ impl Panel {
             }
         }
         self.mark_painted();
+    }
+
+    /// DIB に描いて `target` へ転送する。
+    fn blit(&mut self, target: HDC) {
+        self.render();
 
         let Some(dib) = &self.dib else {
             return;
@@ -742,6 +758,24 @@ impl Panel {
         let (w, h) = (dib.w, dib.h);
         unsafe {
             let _ = BitBlt(target, 0, 0, w, h, dib.dc, 0, 0, SRCCOPY);
+        }
+    }
+
+    /// 検証用: 開いてから `DUMP_AFTER_MS` 経ったら 1 度だけ DIB を BMP に残す。
+    ///
+    /// `DPDFNET_PANEL_SNAPSHOT` にパスを入れたときだけ動く。スクリーンショットと
+    /// 違い、他のウィンドウに隠されていても取れる。
+    fn maybe_dump(&mut self, now_ms: u64) {
+        if self.dumped || now_ms.wrapping_sub(self.opened_at_ms) < DUMP_AFTER_MS {
+            return;
+        }
+        let Some(path) = std::env::var_os("DPDFNET_PANEL_SNAPSHOT") else {
+            return;
+        };
+        self.dumped = true;
+        self.render();
+        if let Some(dib) = self.dib.as_ref() {
+            let _ = draw::write_bmp(dib, std::path::Path::new(&path));
         }
     }
 
@@ -805,6 +839,8 @@ impl Panel {
             last_status_text: String::new(),
             last_summary: String::new(),
             last_flash: None,
+            opened_at_ms: unsafe { GetTickCount64() },
+            dumped: false,
         })
     }
 
