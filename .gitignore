@@ -4,6 +4,7 @@ clear_re/obs_plugin/target/
 clear_re/obs_plugin/payload_tmp/
 clear_re/dpdfnet/target/
 clear_re/vst3/target/
+clear_re/panel_ui/target/
 
 # --- 配布パッケージ (tools/make_package.ps1 で再生成できる) ---
 dist/
