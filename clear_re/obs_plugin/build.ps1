@@ -99,6 +99,11 @@ if ($Tests) {
     if (Test-Path -LiteralPath (Join-Path $dspRoot "Cargo.toml")) {
         $targets += $dspRoot
     }
+    # パネル UI も別クレート（VST3 版と共有）。テストはそちらに移してある。
+    $panelRoot = Join-Path (Split-Path -Parent $root) "panel_ui"
+    if (Test-Path -LiteralPath (Join-Path $panelRoot "Cargo.toml")) {
+        $targets += $panelRoot
+    }
 
     foreach ($t in $targets) {
         Write-Host "==> $cargo $cargoLine" -ForegroundColor Cyan

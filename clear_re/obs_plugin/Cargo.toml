@@ -30,6 +30,10 @@ codegen-units = 1
 # ONNX Runtime のバインディング・FFT・DLL ロードはこのクレート側にある。
 dpdfnet = { path = "../dpdfnet" }
 
+# 自前 Win32 パネル（GDI + DIB）。VST3 版と共有している。Win32 / GDI は
+# このクレート内に生 FFI で書いてある（`windows` クレートに依存しない）。
+panel_ui = { path = "../panel_ui" }
+
 # Win32（自前 UI、ファイル列挙）
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",

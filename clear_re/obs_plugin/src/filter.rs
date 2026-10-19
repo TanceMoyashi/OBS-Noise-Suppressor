@@ -51,7 +51,8 @@ use crate::ui;
 // ステータス
 // --------------------------------------------------------------------------
 
-pub const ST_OK: u32 = 0;
+/// 正常。[`panel_ui::STATUS_OK`] と同じ値（パネルはこの値で正常と判定する）。
+pub const ST_OK: u32 = panel_ui::STATUS_OK;
 /// レート変換段を作れないサンプルレート（パススルー）。
 pub const ST_BAD_RATE: u32 = 1;
 pub const ST_MODEL_NOT_FOUND: u32 = 2;
@@ -63,12 +64,9 @@ pub const ST_INACTIVE: u32 = 5;
 pub const OBS_SR: u32 = crate::dsp::INTERNAL_SAMPLE_RATE as u32;
 
 /// 表示用のレート表記（1000 の倍数は kHz）。ログとパネルで使う。
+/// 実装は共通クレート（VST3 版と同じ）。
 pub fn rate_label(rate: u32) -> String {
-    if rate % 1000 == 0 {
-        format!("{} kHz", rate / 1000)
-    } else {
-        format!("{rate} Hz")
-    }
+    panel_ui::rate_label(rate)
 }
 
 // --------------------------------------------------------------------------
