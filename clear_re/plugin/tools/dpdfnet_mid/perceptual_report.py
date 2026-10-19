@@ -150,12 +150,16 @@ def main() -> int:
     ap.add_argument("--snr", type=float, nargs="+", default=[-5.0, 0.0, 5.0, 10.0])
     ap.add_argument("--out-dir", type=Path, default=Path("build/dpdfnet_train/listen_real"))
     ap.add_argument("--write-wav", action="store_true")
+    ap.add_argument("--out-json", type=Path, default=None,
+                    help="結果 JSON の出力先 (既定: <root>/perceptual_report.json)")
     ap.add_argument("--seed", type=int, default=7)
     args = ap.parse_args()
 
     models = []
+    models_spec: dict[str, str] = {}
     for spec in args.models:
         name, path = spec.split("=", 1)
+        models_spec[name] = path
         models.append((name, session(Path(path))))
         print(f"[model] {name}: {path}")
     names = [m[0] for m in models]
@@ -241,9 +245,11 @@ def main() -> int:
         print(f"{target:+6.0f}" + "".join(
             f"{np.nanmean([r['m'][n]['si_sdr'] for r in vals]):10.2f}" for n in names))
 
-    out = Path(args.root) / "perceptual_report.json"
-    out.write_text(json.dumps({"rows": [{k: v for k, v in r.items() if k != 'm'}
-                                         | {"models": r["m"]} for r in rows],
+    out = args.out_json or (Path(args.root) / "perceptual_report.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({"models": models_spec,
+                               "rows": [{k: v for k, v in r.items() if k != 'm'}
+                                        | {"models": r["m"]} for r in rows],
                                "summary": summary}, ensure_ascii=False, indent=2),
                    encoding="utf-8")
     print(f"\n[ok  ] {out}")
