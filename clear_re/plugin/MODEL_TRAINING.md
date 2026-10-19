@@ -522,10 +522,14 @@ SNR 別の SI-SDR [dB]:
 |---|---|---|
 | **新モデル (2 出力 ONNX)** | `clear_re/plugin/models/dpdfnet4_48khz_hr_2out.onnx` (12,044,747 B) | **未追跡**（大きいので意図的にコミットしない。追加する場合は LFS かリリース添付） |
 | 1 出力 ONNX（2 出力化の元） | `clear_re/plugin/build/dpdfnet_train/onnx/dpdfnet4_48khz_hr.onnx` | 追跡しない（`build/` は .gitignore） |
-| 学習済み重み | `clear_re/plugin/build/dpdfnet_train/ckpt_mid/dp4.best.pth` | 追跡しない |
+| 学習済み重み（最終） | `clear_re/plugin/build/dpdfnet_train/ckpt_mid/dp4b.best.pth` | 追跡しない |
+| 学習済み重み（実ノイズ導入前の旧版） | `clear_re/plugin/build/dpdfnet_train/ckpt_mid/dp4.best.pth` | 追跡しない（比較用に残してある） |
 | 初期値 (dp8 の先頭 4 ブロック) | `clear_re/plugin/build/dpdfnet_train/ckpt_mid/init_dp4.pth` | 追跡しない |
-| 学習ログ | `clear_re/plugin/build/dpdfnet_train/ckpt_mid/dp4.log` | 追跡しない |
-| 聴き比べ WAV | `clear_re/plugin/build/dpdfnet_train/listen*/` | 追跡しない |
+| 学習ログ | `clear_re/plugin/build/dpdfnet_train/ckpt_mid/{dp4,dp4b}.log` | 追跡しない |
+| 学習データのキャッシュ | `clear_re/plugin/build/dpdfnet_train/{speech,test_speech,noise}_48000.{f32,json}` | 追跡しない |
+| 聴き比べ WAV（合成ノイズ） | `clear_re/plugin/build/dpdfnet_train/listen*/` | 追跡しない |
+| **聴き比べ WAV（実ノイズ）** | `clear_re/plugin/build/dpdfnet_train/listen_real*/` | 追跡しない |
+| 知覚指標の生データ | `clear_re/plugin/build/dpdfnet_train/perceptual_report.json` | 追跡しない |
 | ツール一式 | `clear_re/plugin/tools/dpdfnet_mid/*.py` | **コミットする** |
 | この計画書 | `clear_re/plugin/MODEL_TRAINING.md` | **コミットする** |
 
@@ -546,19 +550,24 @@ python tools/dpdfnet_mid/parity_check.py --ckpt build/dpdfnet_train/hf/checkpoin
 
 # 2) 学習データ (LibriSpeech dev-clean, CC BY 4.0) を 48 kHz にデコード
 python tools/dpdfnet_mid/prepare_data.py --root build/dpdfnet_train --hours 2.0
+# 2b) 評価用のクリーン音声 (test-clean) と実ノイズ (MUSAN noise, CC BY 4.0)
+python tools/dpdfnet_mid/prepare_data.py --root build/dpdfnet_train --dataset test-clean --hours 0.7
+python tools/dpdfnet_mid/prepare_noise.py --root build/dpdfnet_train --download
 
 # 3) 初期値 (dp8 の DPRNN ブロック 0〜3 をコピー)
 python tools/dpdfnet_mid/build_mid.py --blocks 4 `
     --out build/dpdfnet_train/ckpt_mid/init_dp4.pth
 
 # 4) 蒸留 (45 分以内で区切る。再開は --resume)
-python tools/dpdfnet_mid/distill.py --batch 4 --seg 3 --lr 1.2e-4 --minutes 40 `
-    --val-every 200 --save-every 200 --out build/dpdfnet_train/ckpt_mid/dp4.pth
+#    実ノイズを 6 割混ぜる (--real-noise-p 0.6)。0 にすると従来の合成ノイズのみ。
+python tools/dpdfnet_mid/distill.py --init build/dpdfnet_train/ckpt_mid/init_dp4.pth `
+    --batch 4 --seg 3 --lr 1e-4 --ri-weight 3.0 --real-noise-p 0.6 --minutes 40 `
+    --val-every 100 --save-every 100 --out build/dpdfnet_train/ckpt_mid/dp4b.pth
 python tools/dpdfnet_mid/distill.py ...(同じ引数) --resume
 
 # 5) ONNX 書き出し + 2 出力化 + 契約検証 (一括)
 python tools/dpdfnet_mid/export_mid.py `
-    --ckpt build/dpdfnet_train/ckpt_mid/dp4.best.pth `
+    --ckpt build/dpdfnet_train/ckpt_mid/dp4b.best.pth `
     --name dpdfnet4_48khz_hr --blocks 4 --out-dir build/dpdfnet_train/onnx
 
 # 6) 速度と品質
@@ -568,6 +577,11 @@ python tools/dpdfnet_mid/quality_libri.py --models dp2=models/dpdfnet2_48khz_hr_
     dp4=models/dpdfnet4_48khz_hr_2out.onnx dp8=models/dpdfnet8_48khz_hr_2out.onnx --n 6
 python tools/dpdfnet_mid/quality_report.py --models ... --wav test_signals/speech_tail_48k.wav `
     test_signals/speech_tail_reverb_48k.wav --write-wav --out-dir build/dpdfnet_train/listen
+# 6b) 知覚指標 (実ノイズ = MUSAN eval split、test-clean 音声)
+python tools/dpdfnet_mid/perceptual_report.py `
+    --models dp2=models/dpdfnet2_48khz_hr_2out.onnx dp4=models/dpdfnet4_48khz_hr_2out.onnx `
+             dp8=models/dpdfnet8_48khz_hr_2out.onnx `
+    --utts 4 --seconds 8 --snr -5 0 5 10 --write-wav --out-dir build/dpdfnet_train/listen_real
 
 # 7) プラグインでの実検証 (プラグイン側は変更しない)
 #    clear_re/dpdfnet のオフラインテストを DPDFNET_MODEL=models/dpdfnet4_48khz_hr_2out.onnx に
@@ -624,13 +638,15 @@ python tools/dpdfnet_mid/quality_report.py --models ... --wav test_signals/speec
 | `tools/dpdfnet_mid/parity_state_segments.py` | state のどの区間に差が出るかの特定 |
 | `tools/dpdfnet_mid/mid_model.py` | オフライン実装の構築・dp8 からの重みコピー・指標 |
 | `tools/dpdfnet_mid/build_mid.py` | dp4 の初期値を作る |
-| `tools/dpdfnet_mid/prepare_data.py` | LibriSpeech の取得と 48 kHz キャッシュ作成 |
-| `tools/dpdfnet_mid/distill.py` | 蒸留学習（45 分区切り・再開可） |
+| `tools/dpdfnet_mid/prepare_data.py` | LibriSpeech の取得と 48 kHz キャッシュ作成（`--dataset test-clean` で評価用） |
+| `tools/dpdfnet_mid/prepare_noise.py` | MUSAN noise の取得・48 kHz 化・学習/評価 split |
+| `tools/dpdfnet_mid/distill.py` | 蒸留学習（45 分区切り・再開可・実ノイズ mix） |
 | `tools/dpdfnet_mid/export_mid.py` | ONNX 書き出し → 2 出力化 → 契約検証 |
 | `tools/dpdfnet_mid/evaluate_mid.py` | teacher との一致度と聴き比べ WAV（オフライン torch 版） |
 | `tools/dpdfnet_mid/quality_report.py` | 付属 WAV + 合成ノイズで 3 モデル比較（ONNX 版） |
 | `tools/dpdfnet_mid/quality_libri.py` | LibriSpeech + ノイズで抑圧性能（クリーン参照あり） |
 | `tools/dpdfnet_mid/transparency.py` | クリーン音声をどれだけ素通しするか（加工の強さ） |
+| `tools/dpdfnet_mid/perceptual_report.py` | 実ノイズ (MUSAN eval) + test-clean で SI-SDR / STOI / PESQ / segSNR |
 
 ---
 
@@ -659,11 +675,19 @@ python tools/dpdfnet_mid/quality_report.py --models ... --wav test_signals/speec
 | データ | ライセンス | 出典・条件 |
 |---|---|---|
 | LibriSpeech dev-clean | **CC BY 4.0** | OpenSLR SLR12 / Panayotov et al., 2015。**帰属表示が必要**（`build/dpdfnet_train/LibriSpeech/LICENSE.TXT` に原文）。再配布する場合は著作者表示とライセンス表示を付ける。 |
+| LibriSpeech test-clean | **CC BY 4.0** | 同上。**評価にのみ使用**（学習には入れていない）。 |
+| MUSAN noise subset | **CC BY 4.0** | OpenSLR SLR17 / Snyder, Chen, Povey, 2015。入手は HF ミラー `FluidInference/musan` の `noise/**`。コーパス全体が CC BY 4.0 で、**クリップ単位の帰属**が `noise/free-sound/` と `noise/sound-bible/` の LICENSE に列挙されている（Attribution 3.0 / Public Domain）。**帰属表示が必要**。 |
 | 合成ノイズ（白色・ピンク・ブラウン・ハム・バブル・非定常・クリック） | 生成物（ライセンス無し） | 本作業で生成。実ファイルを同梱していないので再配布の問題は無い。バブルは LibriSpeech の発話を重ねただけなので LibriSpeech の条項に従う。 |
+| 合成 RIR（指数減衰 + 初期反射） | 生成物（ライセンス無し） | 本作業で生成。 |
 | `test_signals/rir_48k.wav` | このリポジトリのもの | 学習のオーギュメントに使用（評価用 WAV は `build/` にのみ出力） |
 
-**注意**: 学習データ（LibriSpeech の音声）は**リポジトリにコミットしていない**。
-`build/` は追跡外なので、必要な人が `prepare_data.py` で再取得する（§8.2-2）。
+**使わなかったデータと理由**: ESC-50（約 600 MB、環境音 50 クラス）は **CC BY-NC 3.0（非商用）**
+なので、製品に載せる可能性がある今回は避けた。ESC-10 だけなら CC BY だが、
+クラス数が少なく MUSAN で足りる。DEMAND は 16 kHz のみで MUSAN と同条件になるため優先度が低い。
+DNS-Challenge のノイズは数十 GB で、今回の回線（実測 0.3〜0.5 MB/s）では現実的でない。
+
+**注意**: 学習データ（LibriSpeech の音声・MUSAN のノイズ）は**リポジトリにコミットしていない**。
+`build/` は追跡外なので、必要な人が `prepare_data.py` / `prepare_noise.py` で再取得する（§8.2）。
 学習済み重み (`dp4.best.pth`) も同様にコミットしていない（派生物の配布時に上流・
 データのライセンス表示を付けるため）。
 
@@ -673,7 +697,11 @@ python tools/dpdfnet_mid/quality_report.py --models ... --wav test_signals/speec
 This product includes a model derived from DPDFNet
   Copyright (c) Ceva-IP (https://github.com/ceva-ip/DPDFNet), licensed under Apache-2.0.
 Trained using LibriSpeech (Panayotov et al., 2015),
-  licensed under CC BY 4.0 (http://www.openslr.org/12).
+  licensed under CC BY 4.0 (http://www.openslr.org/12),
+and MUSAN (Snyder, Chen, and Povey, 2015),
+  licensed under CC BY 4.0 (http://www.openslr.org/17/).
+MUSAN includes clips from freesound.org and soundbible.com;
+  per-clip attributions are listed in the MUSAN distribution.
 ```
 
 ### 9.4 このリポジトリ内の扱い
