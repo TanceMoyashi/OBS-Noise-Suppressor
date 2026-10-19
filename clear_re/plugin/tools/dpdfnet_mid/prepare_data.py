@@ -27,11 +27,14 @@ import numpy as np
 import soundfile as sf
 from scipy.signal import resample_poly
 
-URL = "https://www.openslr.org/resources/12/dev-clean.tar.gz"
+URLS = {
+    "dev-clean": "https://www.openslr.org/resources/12/dev-clean.tar.gz",
+    "test-clean": "https://www.openslr.org/resources/12/test-clean.tar.gz",
+}
 
 
-def download(url: str, dst: Path) -> None:
-    if dst.is_file() and dst.stat().st_size > 300_000_000:
+def download(url: str, dst: Path, min_bytes: int = 100_000_000) -> None:
+    if dst.is_file() and dst.stat().st_size > min_bytes:
         print(f"[skip] すでに取得済み: {dst} ({dst.stat().st_size} bytes)")
         return
     print(f"[get ] {url} -> {dst}")
@@ -51,8 +54,8 @@ def download(url: str, dst: Path) -> None:
     print(f"[done] {dst} ({dst.stat().st_size} bytes)")
 
 
-def extract(tar: Path, out_dir: Path) -> Path:
-    root = out_dir / "LibriSpeech" / "dev-clean"
+def extract(tar: Path, out_dir: Path, split: str) -> Path:
+    root = out_dir / "LibriSpeech" / split
     if root.is_dir():
         print(f"[skip] 展開済み: {root}")
         return root
@@ -68,21 +71,25 @@ def main() -> int:
     ap.add_argument("--hours", type=float, default=2.0,
                     help="キャッシュする音声の上限時間 (dev-clean 全体は約 5.4 時間)")
     ap.add_argument("--sr", type=int, default=48000)
+    ap.add_argument("--dataset", default="dev-clean", choices=["dev-clean", "test-clean"],
+                    help="test-clean は学習に一切使わない評価用 (ホールドアウト)")
     args = ap.parse_args()
 
     root = args.root.resolve()
     root.mkdir(parents=True, exist_ok=True)
-    tar = root / "dev-clean.tar.gz"
-    download(URL, tar)
-    base = extract(tar, root)
+    url = URLS[args.dataset]
+    tar = root / f"{args.dataset}.tar.gz"
+    download(url, tar, min_bytes=50_000_000)
+    base = extract(tar, root, args.dataset)
 
     flacs = sorted(base.rglob("*.flac"))
     print(f"[scan] {len(flacs)} utterances")
     if not flacs:
         raise SystemExit("ERROR: flac が見つからない")
 
-    raw_path = root / f"speech_{args.sr}.f32"
-    meta_path = root / f"speech_{args.sr}.json"
+    stem = "speech" if args.dataset == "dev-clean" else "test_speech"
+    raw_path = root / f"{stem}_{args.sr}.f32"
+    meta_path = root / f"{stem}_{args.sr}.json"
     limit = int(args.hours * 3600 * args.sr)
     total = 0
     lengths: list[int] = []
@@ -112,8 +119,8 @@ def main() -> int:
                 break
 
     meta = {
-        "source": URL,
-        "dataset": "LibriSpeech dev-clean (OpenSLR SLR12)",
+        "source": url,
+        "dataset": f"LibriSpeech {args.dataset} (OpenSLR SLR12)",
         "license": "CC BY 4.0 (LibriSpeech, Panayotov et al. 2015)",
         "sample_rate": args.sr,
         "utterances": len(lengths),

@@ -73,6 +73,11 @@ def synth_rir(rt60: float, n: int, rng: np.random.Generator) -> np.ndarray:
     ln = int(rt60 * SR)
     h = rng.standard_normal(ln) * np.exp(-6.9 * np.arange(ln) / ln)
     h[0] = 1.0
+    # 初期反射を数本入れて「部屋」の多様性を出す
+    for _ in range(int(rng.integers(1, 5))):
+        d = int(rng.integers(int(0.003 * SR), max(int(0.003 * SR) + 1, int(0.08 * SR))))
+        if d < ln:
+            h[d] += float(rng.uniform(0.2, 0.7)) * (1.0 if rng.random() < 0.5 else -1.0)
     h /= np.sqrt(np.sum(h ** 2))
     out = np.zeros(n, np.float32)
     take = min(n, ln)
@@ -80,7 +85,47 @@ def synth_rir(rt60: float, n: int, rng: np.random.Generator) -> np.ndarray:
     return out
 
 
-def make_noise(kind: str, n: int, rng: np.random.Generator, pool: SpeechPool) -> np.ndarray:
+class NoisePool:
+    """prepare_noise.py が作った実ノイズ (MUSAN) の memmap。
+
+    評価用ファイルは `eval_indices` に入っていて、学習では使わない。
+    """
+
+    def __init__(self, root: Path, split: str = "train"):
+        meta_path = root / f"noise_{SR}.json"
+        if not meta_path.is_file():
+            raise SystemExit(
+                f"ERROR: {meta_path} が無い。先に tools/dpdfnet_mid/prepare_noise.py を実行すること"
+            )
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        self.raw = np.memmap(root / meta["raw_file"], dtype=np.float32, mode="r")
+        lengths = np.asarray(meta["lengths"], np.int64)
+        offs = np.concatenate([[0], np.cumsum(lengths)])
+        ev = {int(i) for i in meta["eval_indices"]}
+        idx = [i for i in range(len(lengths)) if (i in ev) == (split == "eval")]
+        self.starts = offs[idx]
+        self.lengths = lengths[idx]
+        print(f"[noise] {len(idx)} files / {self.lengths.sum()/SR/60:.1f} min ({split}) "
+              f"({meta['dataset']}, {meta['license'].split('.')[0]})")
+
+    def window(self, n: int, rng: np.random.Generator) -> np.ndarray:
+        i = int(rng.integers(0, len(self.lengths)))
+        L = int(self.lengths[i])
+        s = int(self.starts[i])
+        if L <= n:
+            x = np.asarray(self.raw[s:s + L], np.float32)
+            x = np.pad(x, (0, n - L))
+        else:
+            o = int(rng.integers(0, L - n))
+            x = np.asarray(self.raw[s + o:s + o + n], np.float32)
+        x = x - float(x.mean())
+        return (x / (np.sqrt(np.mean(x ** 2)) + 1e-12)).astype(np.float32)
+
+
+def make_noise(kind: str, n: int, rng: np.random.Generator, pool: SpeechPool,
+               noise_pool: "NoisePool | None" = None, real_p: float = 0.0) -> np.ndarray:
+    if noise_pool is not None and rng.random() < real_p:
+        return noise_pool.window(n, rng)
     if kind == "white":
         return rng.standard_normal(n).astype(np.float32)
     if kind == "pink":
@@ -131,7 +176,9 @@ NOISE_KINDS = ["white", "pink", "brown", "hum", "babble", "street", "click"]
 
 def build_batch(pool: SpeechPool, cache_len: int, batch: int, seg_len: int,
                 level_rms: float, rng: np.random.Generator,
-                rir_bank: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+                rir_bank: list[np.ndarray],
+                noise_pool: "NoisePool | None" = None,
+                real_p: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
     """(ノイズ入り入力, クリーン入力) のバッチを作る。どちらもレベルを揃える。"""
     n = seg_len * batch
     idx = pool.any_longer(seg_len)
@@ -154,7 +201,7 @@ def build_batch(pool: SpeechPool, cache_len: int, batch: int, seg_len: int,
         g *= 10 ** (rng.uniform(-4.0, 4.0) / 20.0)
         s = s * g
         kind = NOISE_KINDS[int(rng.integers(0, len(NOISE_KINDS)))]
-        nz = make_noise(kind, seg_len, rng, pool)
+        nz = make_noise(kind, seg_len, rng, pool, noise_pool, real_p)
         target_snr = rng.uniform(-5.0, 20.0)
         gn = np.sqrt(np.mean(s ** 2)) / (np.sqrt(np.mean(nz ** 2)) + 1e-12) * 10 ** (-target_snr / 20)
         x = s + gn * nz
@@ -201,6 +248,10 @@ def main() -> int:
     ap.add_argument("--val-every", type=int, default=200)
     ap.add_argument("--val-seconds", type=float, default=10.0)
     ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--real-noise-p", type=float, default=0.6,
+                    help="実ノイズ (MUSAN) を使う割合。0 で合成ノイズのみ")
+    ap.add_argument("--noise-split", default="train", choices=["train", "eval"],
+                    help="学習に使う実ノイズの split (通常 train)")
     ap.add_argument("--resume", action="store_true", help="--out があれば続きから")
     ap.add_argument("--no-lr-decay", action="store_true")
     args = ap.parse_args()
@@ -222,6 +273,9 @@ def main() -> int:
 
     pool = SpeechPool(args.root)
     seg_len = int(args.seg * SR)
+    noise_pool = None
+    if args.real_noise_p > 0:
+        noise_pool = NoisePool(args.root, args.noise_split)
 
     # RIR: 実測 (test_signals/rir_48k.wav) + 合成
     rir_bank: list[np.ndarray] = []
@@ -265,7 +319,8 @@ def main() -> int:
     val_sigs = []
     for s in (999, 1000, 1001):
         vrng = np.random.default_rng(s)
-        vxx, _ = build_batch(val_pool, 0, 1, val_n, level_rms, vrng, rir_bank)
+        vxx, _ = build_batch(val_pool, 0, 1, val_n, level_rms, vrng, rir_bank,
+                            noise_pool, args.real_noise_p)
         val_sigs.append(vxx[0])
     val_teacher = []
     for vx in val_sigs:
@@ -313,7 +368,8 @@ def main() -> int:
         f"seg={args.seg} minutes={args.minutes}")
 
     while step < args.steps and time.time() < deadline:
-        xs, lv = build_batch(pool, 0, args.batch, seg_len, level_rms, rng, rir_bank)
+        xs, lv = build_batch(pool, 0, args.batch, seg_len, level_rms, rng, rir_bank,
+                             noise_pool, args.real_noise_p)
         x = torch.from_numpy(xs).to(device)
 
         with torch.no_grad():
