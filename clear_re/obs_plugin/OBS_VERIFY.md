@@ -34,6 +34,9 @@ python tools\measure_effect.py --model models\dpdfnet8_48khz_hr_2out.onnx `
 - 遅延: **2880 サンプル = 60 ms**
 - CPU（offline, 1 フレーム = 10 ms 音声）: stereo で dpdfnet2 1.66 ms（RTF 0.17）/
   dpdfnet8 4.79 ms（RTF 0.48）
+- 既定モデル: プロパティの「モデル」が**自動**のときは**中間 `dpdfnet4`** を
+  優先します（`dpdfnet4_48khz_hr_2out.onnx`）。**dp4 の実測はまだ取れていません**
+  （上の表は dp2 / dp8 の実測）。
 
 **残響つきで Voice Reverb を 0→1 にすると、尾が 20 dB 以上小さくなる**のが正常な
 状態です。聴いてこれが分からなければ、どこかで止まっています。
@@ -155,7 +158,7 @@ test result: ok. 1 passed; 0 failed
 | REVERB の **MUTE / BYP** | MUTE で残響が消える（0 %）/ BYP で素の残響（100 %）。1 出力モデルではキーごと暗くて押せない |
 | MUTE / BYP と**プリセット** | MUTE にした状態で SAVE → 値を変えて呼び出すと MUTE ごと戻る。OBS 再起動後も残る |
 | **BYPASS** | 素通しに戻る。**遅延は維持されない**（切り替えると音の位置が 60 ms 飛ぶ） |
-| **モデル** を dp8 ↔ dp2 | 数十 ms 無音になったあと、効きと CPU 負荷が変わる（dp2 が軽い） |
+| **モデル** を dp8 ↔ dp4 ↔ dp2 | 数十 ms 無音になったあと、効きと CPU 負荷が変わる（dp2 が軽い） |
 | **VU 基準値** を −20 / −18 / −14 | 針の位置と VU 目盛りが平行移動する（音は変わらない） |
 | **メモリー** SAVE → 番号 | LED が点く。別の値にして番号を押すと戻る。OBS 再起動後も残る |
 | **メモリー** Ctrl + 番号 | 消去され、LED が消える |
@@ -618,6 +621,7 @@ CPU 実行のビット一致を守るために名前を分けて同居させて�
 ```powershell
 # CPU / モデルを固定（負荷を測りやすい。auto だと自動切替が挟まる）
 .\tools\run_obs_verify.ps1 -Model dp2
+.\tools\run_obs_verify.ps1 -Model dp4   # 既定（自動）と同じ中間モデルで測る
 # GPU。CPU とビット一致しないのでテストは回さない（-WithGpu で DLL も入れる）
 .\tools\run_obs_verify.ps1 -InferenceDevice gpu -Model dp2 -SkipTest -WithGpu
 ```

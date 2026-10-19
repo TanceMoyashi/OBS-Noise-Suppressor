@@ -30,6 +30,7 @@ install.bat -Dest "D:\VST3"       好きな場所
 DPDFNet Voice.vst3\Contents\x86_64-win\DPDFNet Voice.vst3   本体
                                       \dpdfnet_onnxruntime.dll
                                       \models\dpdfnet8_48khz_hr_2out.onnx  高品質
+                                      \models\dpdfnet4_48khz_hr_2out.onnx  中間（自動の既定）
                                       \models\dpdfnet2_48khz_hr_2out.onnx  軽量
 ```
 
@@ -62,7 +63,7 @@ cd clear_re\vst3
 | Voice | −12 – +12 dB / 0 dB | presence |
 | Voice Reverb | 0 – 100 % / 0 % | 残す残響。0 % = 残さない、100 % = そのまま |
 | （各モード） | 有効 / ミュート / バイパス | つまみの位置は保ったまま効きだけ切る（OBS 版の MUTE / BYP と同じ） |
-| Model | 自動 / 高品質 (dp8) / 軽量 (dp2) | **自動化されない**設定 |
+| Model | 自動 / 高品質 (dp8) / 中間 (dp4) / 軽量 (dp2) | **自動化されない**設定 |
 | Inference Device | CPU / GPU (DirectML) | **自動化されない**設定。既定 CPU |
 | Bypass | オフ / オン | 全体のバイパス。オンにすると素通し（パネルの BYPASS キー） |
 
@@ -94,7 +95,7 @@ OBS 版と揃えてあります。
 | AMBIENCE / VOICE / REVERB | ドラッグ / ホイール / ダブルクリックで既定値へ。ホストの自動化にも乗ります |
 | MUTE / BYP | つまみの値は保ったまま効きだけ切る。同じキーをもう一度押すと戻る（排他） |
 | BYPASS | 全体の有効 / 無効。オフにすると素通しし、針は静止位置へ戻ります |
-| MODEL | 押すたびに 自動 → dp8 → dp2 → 自動（`Model` パラメータと同じ） |
+| MODEL | 押すたびに 自動 → dp2 → dp4 → dp8 → 自動（`Model` パラメータと同じ） |
 | DEV | 押すたびに CPU → GPU → CPU（`Inference Device` と同じ） |
 | MEMORY 1〜8 | 押すとその設定を呼び出す。`SAVE` を押してからスロットを押すと保存。`Ctrl` + クリックで消去 |
 | メーター | IN / OUT の VU とピーク、EFFECT の GR / 3 バンド。ダブルクリックでピークホールドを消す |
@@ -115,9 +116,10 @@ OBS 版と揃えてあります。
 
 ## 起動時のモデル選択（「自動」のとき）
 
-`Model` が「自動」のときは、**音を出す前に**実際に何ホップか回して 1 ホップの
+`Model` が「自動」のときは、**中間モデル (dp4) を優先**して組み立て、
+**音を出す前に**実際に何ホップか回して 1 ホップの
 平均処理時間を実測します（`Engine::measure_hop_us`）。予算（1 ホップ = 10 ms）の
-75 % を超えていれば、**最初から軽量モデルで開始**します。
+75 % を超えていれば、**最初から軽量モデル (dp2) で開始**します。
 
 - 実測はマシンが空いているときに取るので実運用より小さく出ます（開発機の dp8:
   実測 5.5 ms ↔ 実運用 6.7 ms = 約 1.2 倍）。その差を見込んで実行中の警告水準
@@ -147,7 +149,7 @@ $env:DPDFNET_MODEL = "..\plugin\models\dpdfnet8_48khz_hr_2out.onnx"
 | `output_does_not_depend_on_the_host_block_size` | ブロックサイズ 1 / 480 / 960 / 1024 / 4096 / 8192 で出力が**ビット一致**（DAW は好きな長さで呼んでくる） |
 | `mono_and_stereo_produce_the_same_channels` | モノラルとステレオ（同一入力）でチャンネル出力がビット一致 |
 | `latency_is_reported_in_host_samples` | 48 kHz = 2880 / 96 kHz = 2 倍 + 変換段 |
-| `auto_model_calibration_picks_one_model_without_leaving_a_trace` | 「自動」の出力が、選ばれたモデル（高品質 / 軽量）の出力と一致する |
+| `auto_model_calibration_picks_one_model_without_leaving_a_trace` | 「自動」の出力が、選ばれたモデル（中間 / 軽量）の出力と一致する |
 | `default_snapshot_matches_the_obs_defaults` ほか | パラメータの既定値と範囲が OBS 版と同じ |
 
 DSP そのもの（遅延 2880 サンプル、モデルの読み込み、レート変換、負荷判定）は

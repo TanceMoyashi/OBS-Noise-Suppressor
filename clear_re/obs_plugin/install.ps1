@@ -439,6 +439,7 @@ if ($Packaged) {
             throw "モデルのコピー元がありません: $ModelSource"
         }
         $modelNames = @(
+            "dpdfnet4_48khz_hr_2out.onnx",
             "dpdfnet8_48khz_hr_2out.onnx",
             "dpdfnet2_48khz_hr_2out.onnx",
             "dpdfnet8_48khz_hr.onnx",

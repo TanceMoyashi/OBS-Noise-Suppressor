@@ -42,8 +42,8 @@ ONNX Runtime と DPDFNet モデルを同梱した Windows x64 版で、追加の
 | サンプルレート | **44.1 / 48 / 88.2 / 96 / 176.4 / 192 kHz など**。48 kHz 以外は入出力でレート変換して内部 48 kHz で処理（変換段を作れない異常値のみパススルー） |
 | チャンネル | モノラル → モノラル / ステレオ → ステレオ（OBS の音声設定に追従） |
 | 内容遅延 | **2880 サンプル = 60 ms 固定**（`kLatencyHops = 6` × hop 480。VST3 版と同一）。48 kHz 以外ではレート変換ぶん（約 2〜5 ms）が加算 |
-| 推論 | 同梱の ONNX Runtime 1.31.0（`dpdfnet_onnxruntime.dll`）+ DPDFNet モデル 4 つ |
-| モデル選択 | OBS プロパティで **自動 / 高品質 (dp8) / 軽量 (dp2)** を選択 |
+| 推論 | 同梱の ONNX Runtime 1.31.0（`dpdfnet_onnxruntime.dll`）+ DPDFNet モデル（軽量 dp2 / 中間 dp4 / 品質 dp8） |
+| モデル選択 | OBS プロパティで **自動 / 高品質 (dp8) / 中間 (dp4) / 軽量 (dp2)** を選択。既定の「自動」は中間 dp4 を優先 |
 | 推論デバイス | OBS プロパティで **CPU（既定）/ GPU (DirectML)** を選択。**GPU は実測で CPU より遅い**ため追加パック扱い（下記） |
 | UI | 自前の Win32/GDI パネル（IN / OUT VU 2 本 + 縦フェーダー 3 本 + ミュート / バイパス + GR / 3 バンドメーター） |
 | プリセット | 1〜8 のスロット（`presets.json` に保存） |
@@ -111,9 +111,11 @@ OBS のプロパティにある **「パネルを開く（フェーダー / メ�
 - OBS Studio 28 以降 / Windows x64（検証は 32.2.2）
 - OBS の音声設定は **44.1 / 48 / 88.2 / 96 / 176.4 / 192 kHz** など（48 kHz 以外は
   内部で 48 kHz に変換して処理します。変換段を作れない異常値のときだけパススルー）
-- CPU は**高品質モデル (`dpdfnet8`) でコア 1 本をほぼ使い切る**ため、ノート PC や
-  古い CPU では**軽量モデル (`dpdfnet2`)** を選んでください（負荷は約 1/3。
-  実測値と自動切り替えの説明は [`clear_re/obs_plugin/README.md`](clear_re/obs_plugin/README.md#cpu-負荷の目安音が途切れる--遅れて聞こえるとき)）
+- CPU 負荷は**品質モデル (`dpdfnet8`) でコア 1 本をほぼ使い切る**ため、既定の
+  「自動」は品質と軽量の中間である**中間モデル (`dpdfnet4`)** を優先します
+  （負荷も品質と軽量の中間の見込み。**dp4 の実測はまだ取れていません**）。
+  それでも足りないノート PC や古い CPU では**軽量モデル (`dpdfnet2`)** を選んで
+  ください（負荷は約 1/3。実測値と自動切り替えの説明は [`clear_re/obs_plugin/README.md`](clear_re/obs_plugin/README.md#cpu-負荷の目安音が途切れる--遅れて聞こえるとき)）
 - GPU (DirectML) は**追加パック**（`OBS-Noise-Suppressor-<版>-gpu-pack.zip`）を
   入れたときだけ選べます。**実測では GPU は CPU より遅い**ので（このマシン /
   ステレオで `dp8` 6.68 → 12.73 ms、`dp2` 2.51 → 4.66 ms）、CPU に余裕があるなら
@@ -125,7 +127,7 @@ OBS のプロパティにある **「パネルを開く（フェーダー / メ�
 ```powershell
 cd clear_re\obs_plugin
 .\build.ps1                 # cargo build --release（配布する DLL）
-.\build.ps1 -Tests          # cargo test --release --lib（OBS 版 41 + DSP コア 45 テスト）
+.\build.ps1 -Tests          # cargo test --release --lib（OBS 版 18 + DSP コア 46 + パネル UI 32 テスト）
 .\tools\make_package.ps1    # 配布パッケージ (dist\) と ZIP を作る
 .\tools\make_package.ps1 -GpuPack  # GPU (DirectML) の追加パックを作る
 .\tools\run_obs_verify.ps1  # OBS を実際に回して遅延と DSP を数値で確認する
@@ -180,7 +182,7 @@ ONNX Runtime とモデルは `vendor/` と `clear_re/plugin/models/` に入っ�
 
 | 手順 | 内容 |
 | --- | --- |
-| 1 | フィルタのプロパティで **「モデル」を `軽量 (dp2)`** にする（負荷が約 1/3） |
+| 1 | フィルタのプロパティで **「モデル」を `軽量 (dp2)`** にする（負荷がぐっと下がります。中間 `dp4` でも足りないときに） |
 | 2 | Windows の電源プランを **「高パフォーマンス」** にする（ノート PC をバッテリーで使っていると特に） |
 | 3 | 録画 / 配信のエンコーダを **GPU（NVENC / QSV / AMF）** にする（x264 = CPU エンコードは 1 ホップの予算を奪う） |
 | 4 | 他に重いフィルタ / プラグインがあれば外す。OBS の「統計」で `skipped frames` が増えていないか見る |
@@ -197,7 +199,8 @@ ONNX Runtime とモデルは `vendor/` と `clear_re/plugin/models/` に入っ�
 > 追いついていないのが原因です。プラグインの遅延自体は 60 ms で固定なので、
 > 遅れが積み上がることはありません。次の順で試してください。
 >
-> 1. フィルタのプロパティ →「モデル」を **軽量 (dp2)** に変更（いちばん効きます）
+> 1. フィルタのプロパティ →「モデル」を **軽量 (dp2)** に変更（いちばん効きます。
+>    既定は中間 dp4 です）
 > 2. Windows の設定 → システム → 電源 → 電源モードを **最適なパフォーマンス** に
 > 3. OBS の設定 → 出力 → エンコーダを **ハードウェア（NVENC / QSV / AMF）** に
 >    （ソフトウェア x264 は CPU を 1 コアぶん持っていきます）

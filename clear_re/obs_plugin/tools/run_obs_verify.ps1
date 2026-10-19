@@ -40,8 +40,9 @@
     `-SkipTest` を付けて live_dump テストは回さないこと。
 
 .PARAMETER Model
-    フィルタの「モデル」（既定 auto）。負荷を測るときは `dp8` / `dp2` に固定すると
-    自動フォールバックが挟まらず読みやすい（`auto` は高負荷時に dp2 へ切り替わる）。
+    フィルタの「モデル」（既定 auto）。負荷を測るときは `dp8` / `dp4` / `dp2` に
+    固定すると自動フォールバックが挟まらず読みやすい（`auto` は高負荷時に dp2 へ
+    切り替わる）。
 
 .PARAMETER WithGpu
     インストール時に GPU (DirectML) 用の DLL も入れる（`install.ps1 -WithGpu`）。
@@ -75,7 +76,7 @@ param(
     [int]$SampleRate = 48000,
     [ValidateSet("cpu", "gpu")]
     [string]$InferenceDevice = "cpu",
-    [ValidateSet("auto", "dp8", "dp2")]
+    [ValidateSet("auto", "dp8", "dp4", "dp2")]
     [string]$Model = "auto",
     [string]$Wav = "",
     [string]$WorkDir = (Join-Path $env:LOCALAPPDATA "Temp\opencode\live"),
@@ -395,8 +396,13 @@ try {
         }
         if (-not $env:DPDFNET_MODEL) {
             # 参照は「OBS 側で選んだモデル」と揃える必要がある（bit 一致を見るため）。
-            # `auto` は高品質優先で dpdfnet8 が選ばれるので、それに合わせる。
-            $file = if ($Model -eq "dp2") { "dpdfnet2_48khz_hr_2out.onnx" } else { "dpdfnet8_48khz_hr_2out.onnx" }
+            # `auto` は中間優先で dpdfnet4 が選ばれるので、それに合わせる。
+            $file = switch ($Model) {
+                "dp2" { "dpdfnet2_48khz_hr_2out.onnx" }
+                "dp4" { "dpdfnet4_48khz_hr_2out.onnx" }
+                "dp8" { "dpdfnet8_48khz_hr_2out.onnx" }
+                default { "dpdfnet4_48khz_hr_2out.onnx" }
+            }
             $m = Join-Path $repo "plugin\models\$file"
             if (Test-Path -LiteralPath $m) { $env:DPDFNET_MODEL = $m }
         }

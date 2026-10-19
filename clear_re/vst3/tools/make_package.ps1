@@ -14,6 +14,7 @@
             DPDFNet Voice.vst3                      本体（cargo の出力をリネーム）
             dpdfnet_onnxruntime.dll                 ONNX Runtime (CPU)
             models\dpdfnet8_48khz_hr_2out.onnx      高品質モデル
+            models\dpdfnet4_48khz_hr_2out.onnx      中間モデル（自動の既定）
             models\dpdfnet2_48khz_hr_2out.onnx      軽量モデル
 
     モデルと ONNX Runtime は OBS 版と同じものを使う（リポジトリに追跡済み）。
@@ -97,6 +98,7 @@ if ($newestSrc -and $dllTime -lt $newestSrc.LastWriteTime) {
 $need = @(
     (Join-Path $vendor "dpdfnet_onnxruntime.dll"),
     (Join-Path $models "dpdfnet8_48khz_hr_2out.onnx"),
+    (Join-Path $models "dpdfnet4_48khz_hr_2out.onnx"),
     (Join-Path $models "dpdfnet2_48khz_hr_2out.onnx")
 )
 if ($WithGpu) {
@@ -117,6 +119,7 @@ New-Item -ItemType Directory -Force -Path $inner, $modDir | Out-Null
 Copy-Item -LiteralPath $dll -Destination $bin -Force
 Copy-Item -LiteralPath (Join-Path $vendor "dpdfnet_onnxruntime.dll") -Destination $inner -Force
 Copy-Item -LiteralPath (Join-Path $models "dpdfnet8_48khz_hr_2out.onnx") -Destination $modDir -Force
+Copy-Item -LiteralPath (Join-Path $models "dpdfnet4_48khz_hr_2out.onnx") -Destination $modDir -Force
 Copy-Item -LiteralPath (Join-Path $models "dpdfnet2_48khz_hr_2out.onnx") -Destination $modDir -Force
 if ($WithGpu) {
     foreach ($n in @("dpdfnet_onnxruntime_dml.dll", "DirectML.dll", "onnxruntime_providers_shared.dll")) {
@@ -196,12 +199,13 @@ VST3 プラグインです。話し声から暗騒音と残響を落とします
     Voice          presence (+-12 dB)
     Voice Reverb   残す残響 (0 % = 残さない / 100 % = そのまま)
     上の 3 つには ミュート / バイパス の切り替えが付いています
-    Model          自動 / 高品質 (dp8) / 軽量 (dp2)
+    Model          自動 / 高品質 (dp8) / 中間 (dp4) / 軽量 (dp2)
     Inference Device  CPU / GPU (DirectML)
     Bypass         全体のバイパス (オンのとき素通し)
 
-「自動」は起動時に実測して、重ければ軽量モデルで始めます (音が乱れる前に決める)。
-Model と Inference Device は自動化されない設定です。変えると一瞬音が途切れます。
+「自動」は中間モデル (dp4) を優先して選びます。起動時に実測して、重ければ
+軽量モデル (dp2) で始めます (音が乱れる前に決める)。Model と Inference Device は
+自動化されない設定です。変えると一瞬音が途切れます。
 
 知っておくこと
 --------------

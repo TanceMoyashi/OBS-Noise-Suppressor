@@ -249,9 +249,9 @@ def main() -> int:
     )
     ap.add_argument(
         "--model",
-        choices=["auto", "dp8", "dp2"],
+        choices=["auto", "dp8", "dp4", "dp2"],
         default="auto",
-        help="フィルタのモデル（既定 auto。負荷測定では dp8 / dp2 に固定すると読みやすい）",
+        help="フィルタのモデル（既定 auto。負荷測定では dp8 / dp4 / dp2 に固定すると読みやすい）",
     )
     args = ap.parse_args()
 
