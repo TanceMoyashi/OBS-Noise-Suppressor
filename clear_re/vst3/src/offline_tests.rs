@@ -8,7 +8,7 @@
 //!   2. モノラルとステレオで、同じ入力のチャンネル出力が一致すること
 //!   3. 遅延の報告が 48 kHz で 2880 サンプル、他レートで比例して増えること
 //!   4. 「自動」モデルの起動時キャリブレーションが痕跡を残さないこと
-//!      （落ちたときは軽量モデルの出力と一致し、落ちないときは品質モデルと一致する）
+//!      （落ちたときは軽量モデルの出力と一致し、落ちないときは中間モデルと一致する）
 //!
 //! 実行方法（モデルと ONNX Runtime を指定する。無ければスキップして成功扱い）:
 //! ```text
@@ -136,20 +136,21 @@ fn auto_model_calibration_picks_one_model_without_leaving_a_trace() {
         return;
     }
 
-    // 品質 / 軽量それぞれの「正解」を出しておく。
-    let (q_core, quality) = run(2, 1024, ModelChoice::Quality);
-    assert_eq!(q_core.model(), ModelChoice::Quality);
+    // 中間 (dp4) / 軽量 (dp2) それぞれの「正解」を出しておく。
+    // 「自動」は中間を優先し、起動時に実測して重ければ軽量へ落ちる
+    // （選んだ方の出力と一致するはず）。
+    let (m_core, middle) = run(2, 1024, ModelChoice::Middle);
+    assert_eq!(m_core.model(), ModelChoice::Middle);
     let (f_core, light) = run(2, 1024, ModelChoice::Fast);
     assert_eq!(f_core.model(), ModelChoice::Fast);
 
-    // 「自動」は起動時に実測してどちらかを選ぶ（選んだ方の出力と一致するはず）。
     let (auto_core, auto) = run(2, 1024, ModelChoice::Auto);
     let chosen = auto_core.model();
     eprintln!("自動 → {}", chosen.as_str());
 
     let expected = match chosen {
         ModelChoice::Fast => &light,
-        _ => &quality,
+        _ => &middle,
     };
     assert_eq!(&auto, expected, "自動の出力が選んだモデルの出力と違う");
 }

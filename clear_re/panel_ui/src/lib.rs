@@ -1311,14 +1311,15 @@ impl Panel {
         self.invalidate();
     }
 
-    /// MODEL キー: Auto -> dp8 -> dp2 -> Auto と巡回する。
+    /// MODEL キー: Auto -> dp2 -> dp4 -> dp8 -> Auto と巡回する。
     ///
     /// ドロップダウンは作らない（README の既知の制限に書いてある）。
     fn cycle_model(&mut self) {
         let next = match self.state.model {
-            ModelChoice::Auto => ModelChoice::Quality,
-            ModelChoice::Quality => ModelChoice::Fast,
-            ModelChoice::Fast => ModelChoice::Auto,
+            ModelChoice::Auto => ModelChoice::Fast,
+            ModelChoice::Fast => ModelChoice::Middle,
+            ModelChoice::Middle => ModelChoice::Quality,
+            ModelChoice::Quality => ModelChoice::Auto,
         };
         self.state.model = next;
         self.current_slot = None;
@@ -1601,9 +1602,11 @@ mod tests {
 
         let k = p.layout.model_key_rect();
         p.on_mouse_down(k.l + 1, k.t + 1, 0);
-        assert_eq!(p.state.model, ModelChoice::Quality);
-        p.on_mouse_down(k.l + 1, k.t + 1, 0);
         assert_eq!(p.state.model, ModelChoice::Fast);
+        p.on_mouse_down(k.l + 1, k.t + 1, 0);
+        assert_eq!(p.state.model, ModelChoice::Middle);
+        p.on_mouse_down(k.l + 1, k.t + 1, 0);
+        assert_eq!(p.state.model, ModelChoice::Quality);
         p.on_mouse_down(k.l + 1, k.t + 1, 0);
         assert_eq!(p.state.model, ModelChoice::Auto);
 
@@ -1612,6 +1615,7 @@ mod tests {
         assert_eq!(p.state.device, DeviceChoice::Gpu);
 
         let ev = host.events();
+        assert!(ev.iter().any(|e| matches!(e, Event::Model(ModelChoice::Middle))));
         assert!(ev.iter().any(|e| matches!(e, Event::Model(ModelChoice::Quality))));
         assert!(ev.contains(&Event::Device(DeviceChoice::Gpu)));
     }

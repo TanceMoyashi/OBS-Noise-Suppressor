@@ -52,10 +52,14 @@ impl FeatureKind {
     }
 }
 
-/// 使うモデル（OBS 版の `model` 設定と同じ 3 択）。
+/// 使うモデル（OBS 版の `model` 設定と同じ 4 択）。
+///
+/// `Middle` (dp4) は末尾に足してある。既存プロジェクトに保存済みの
+/// `Auto` / `Quality` / `Fast` の並びを変えないため（enum は宣言順が
+/// 保存・自動化の番号になる）。
 #[derive(Enum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelKind {
-    /// 自動（品質優先。重ければ実測で軽量に落ちる）。
+    /// 自動（中間 dp4 を優先。重ければ実測で軽量に落ちる）。
     #[id = "auto"]
     #[name = "自動"]
     Auto,
@@ -67,6 +71,10 @@ pub enum ModelKind {
     #[id = "dp2"]
     #[name = "軽量 (dp2)"]
     Fast,
+    /// 中間 (`dpdfnet4`)。品質と速度の中間で、自動の既定。
+    #[id = "dp4"]
+    #[name = "中間 (dp4)"]
+    Middle,
 }
 
 impl ModelKind {
@@ -75,6 +83,7 @@ impl ModelKind {
             Self::Auto => ModelChoice::Auto,
             Self::Quality => ModelChoice::Quality,
             Self::Fast => ModelChoice::Fast,
+            Self::Middle => ModelChoice::Middle,
         }
     }
 
@@ -84,6 +93,7 @@ impl ModelKind {
             ModelChoice::Auto => Self::Auto,
             ModelChoice::Quality => Self::Quality,
             ModelChoice::Fast => Self::Fast,
+            ModelChoice::Middle => Self::Middle,
         }
     }
 }
@@ -286,6 +296,7 @@ mod tests {
             (ModelKind::Auto, ModelChoice::Auto),
             (ModelKind::Quality, ModelChoice::Quality),
             (ModelKind::Fast, ModelChoice::Fast),
+            (ModelKind::Middle, ModelChoice::Middle),
         ] {
             assert_eq!(k.to_dsp(), c);
         }
@@ -298,7 +309,7 @@ mod tests {
         for k in [FeatureKind::Active, FeatureKind::Mute, FeatureKind::Bypass] {
             assert_eq!(FeatureKind::from_dsp(k.to_dsp()), k);
         }
-        for k in [ModelKind::Auto, ModelKind::Quality, ModelKind::Fast] {
+        for k in [ModelKind::Auto, ModelKind::Quality, ModelKind::Fast, ModelKind::Middle] {
             assert_eq!(ModelKind::from_dsp(k.to_dsp()), k);
         }
         for k in [DeviceKind::Cpu, DeviceKind::Gpu] {

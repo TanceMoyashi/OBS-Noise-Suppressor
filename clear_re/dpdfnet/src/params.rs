@@ -12,7 +12,7 @@ pub const AMBIENCE: &CStr = c"ambience";
 pub const VOICE: &CStr = c"voice";
 /// `voiceReverb` 0..1。残す残響量（1 = そのまま）。
 pub const VOICE_REVERB: &CStr = c"voiceReverb";
-/// `model` — 使うモデル。"auto" / "dp8" / "dp2"（`paths::ModelChoice`）。
+/// `model` — 使うモデル。"auto" / "dp8" / "dp4" / "dp2"（`paths::ModelChoice`）。
 pub const MODEL: &CStr = c"model";
 /// `inferenceDevice` — 推論デバイス。"cpu" / "gpu"（`paths::DeviceChoice`）。
 pub const DEVICE: &CStr = c"inferenceDevice";

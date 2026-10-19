@@ -20,8 +20,14 @@ use windows::Win32::System::LibraryLoader::{
     GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 };
 
-/// 品質優先 → 速度優先。2 出力版 (spec_ns 付き = Voice Reverb 可) を優先する。
-pub const MODEL_FILE_NAMES: [&str; 4] = [
+/// 自動 (`ModelChoice::Auto`) の探索順。
+///
+/// **先頭は中間 (dp4)**。品質 (dp8) は重く、軽量 (dp2) は音質が落ちるため、
+/// 1 ホップ = 10 ms の予算に余裕を持って収まる中間を既定にしている。以降は
+/// 品質 → 軽量の順に落ちる。2 出力版 (spec_ns 付き = Voice Reverb 可) を
+/// 優先し、無ければ 1 出力版へ落ちる。
+pub const MODEL_FILE_NAMES: [&str; 5] = [
+    "dpdfnet4_48khz_hr_2out.onnx",
     "dpdfnet8_48khz_hr_2out.onnx",
     "dpdfnet2_48khz_hr_2out.onnx",
     "dpdfnet8_48khz_hr.onnx",
@@ -34,6 +40,9 @@ pub const MODEL_FILE_NAMES_DP8: [&str; 2] = [
     "dpdfnet8_48khz_hr.onnx",
 ];
 
+/// 中間モデル (dpdfnet4) のみ。1 出力版は同梱していない。
+pub const MODEL_FILE_NAMES_DP4: [&str; 1] = ["dpdfnet4_48khz_hr_2out.onnx"];
+
 /// 軽量モデル (dpdfnet2) のみ。2 出力版を優先。
 pub const MODEL_FILE_NAMES_DP2: [&str; 2] = [
     "dpdfnet2_48khz_hr_2out.onnx",
@@ -42,18 +51,22 @@ pub const MODEL_FILE_NAMES_DP2: [&str; 2] = [
 
 /// 使用するモデルの選択（OBS のプロパティ「モデル」）。
 ///
-/// 同梱しているのは `dpdfnet8` と `dpdfnet2` の 2 種だけなので、選択肢は
-/// この 3 つで足りる。保存される文字列 (`as_str`) は**変えてはいけない**
-/// （シーンコレクションに保存済みの値が読めなくなる）。
+/// 同梱しているのは `dpdfnet8` / `dpdfnet4` / `dpdfnet2` の 3 種なので、
+/// 選択肢はこの 4 つ。保存される文字列 (`as_str`) と `code()` は**変えては
+/// いけない**（シーンコレクションに保存済みの値・プリセットの `model` 文字列・
+/// `AtomicU8` の code が読めなくなる）。`Middle` は末尾に足して code 3 を
+/// 使うので、既存の 0 / 1 / 2 はそのまま。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ModelChoice {
-    /// 自動: 高品質を優先し、無ければ軽量に落ちる。
+    /// 自動: 中間 (dp4) を優先し、無ければ品質 (dp8) → 軽量 (dp2) と落ちる。
     #[default]
     Auto,
     /// 高品質 (`dpdfnet8_*`)。
     Quality,
     /// 軽量・低負荷 (`dpdfnet2_*`)。
     Fast,
+    /// 中間 (`dpdfnet4_*`)。品質と速度の中間で、**自動の既定**。
+    Middle,
 }
 
 impl ModelChoice {
@@ -62,6 +75,7 @@ impl ModelChoice {
             Self::Auto => "auto",
             Self::Quality => "dp8",
             Self::Fast => "dp2",
+            Self::Middle => "dp4",
         }
     }
 
@@ -70,6 +84,8 @@ impl ModelChoice {
         match s {
             "dp8" | "quality" => Self::Quality,
             "dp2" | "fast" => Self::Fast,
+            // 保存側は "dp4" だが、"middle" も受け付ける。
+            "dp4" | "middle" => Self::Middle,
             _ => Self::Auto,
         }
     }
@@ -79,6 +95,8 @@ impl ModelChoice {
             Self::Auto => 0,
             Self::Quality => 1,
             Self::Fast => 2,
+            // 既存 0 / 1 / 2 は変えられないので、空いている 3 を使う。
+            Self::Middle => 3,
         }
     }
 
@@ -86,6 +104,7 @@ impl ModelChoice {
         match c {
             1 => Self::Quality,
             2 => Self::Fast,
+            3 => Self::Middle,
             _ => Self::Auto,
         }
     }
@@ -96,6 +115,7 @@ impl ModelChoice {
             Self::Auto => &MODEL_FILE_NAMES,
             Self::Quality => &MODEL_FILE_NAMES_DP8,
             Self::Fast => &MODEL_FILE_NAMES_DP2,
+            Self::Middle => &MODEL_FILE_NAMES_DP4,
         }
     }
 }
@@ -367,7 +387,12 @@ mod tests {
 
     #[test]
     fn model_choice_round_trips() {
-        for c in [ModelChoice::Auto, ModelChoice::Quality, ModelChoice::Fast] {
+        for c in [
+            ModelChoice::Auto,
+            ModelChoice::Quality,
+            ModelChoice::Fast,
+            ModelChoice::Middle,
+        ] {
             assert_eq!(ModelChoice::from_setting(c.as_str()), c);
             assert_eq!(ModelChoice::from_code(c.code()), c);
         }
@@ -385,16 +410,31 @@ mod tests {
     fn model_choice_accepts_aliases() {
         assert_eq!(ModelChoice::from_setting("quality"), ModelChoice::Quality);
         assert_eq!(ModelChoice::from_setting("fast"), ModelChoice::Fast);
+        // 新しい中間モデルは保存側 "dp4" のほか "middle" も受ける。
+        assert_eq!(ModelChoice::from_setting("middle"), ModelChoice::Middle);
+        assert_eq!(ModelChoice::from_setting("dp4"), ModelChoice::Middle);
+    }
+
+    /// `code()` は既存の値（0 / 1 / 2）を変えてはいけない（保存済み設定の互換）。
+    #[test]
+    fn model_codes_keep_their_saved_values() {
+        assert_eq!(ModelChoice::Auto.code(), 0);
+        assert_eq!(ModelChoice::Quality.code(), 1);
+        assert_eq!(ModelChoice::Fast.code(), 2);
+        assert_eq!(ModelChoice::Middle.code(), 3);
     }
 
     #[test]
     fn model_names_are_ordered_by_preference() {
         // 2 出力版 (Voice Reverb 付き) を先に見る。
+        assert_eq!(ModelChoice::Middle.names()[0], "dpdfnet4_48khz_hr_2out.onnx");
         assert_eq!(ModelChoice::Quality.names()[0], "dpdfnet8_48khz_hr_2out.onnx");
         assert_eq!(ModelChoice::Fast.names()[0], "dpdfnet2_48khz_hr_2out.onnx");
-        // Auto は 4 ファイル全部を品質優先で見る。
+        // Auto は 5 ファイル全部を中間優先で見る。
         assert_eq!(ModelChoice::Auto.names().len(), MODEL_FILE_NAMES.len());
-        assert_eq!(ModelChoice::Auto.names()[0], "dpdfnet8_48khz_hr_2out.onnx");
-        assert_eq!(ModelChoice::Auto.names()[3], "dpdfnet2_48khz_hr.onnx");
+        assert_eq!(ModelChoice::Auto.names()[0], "dpdfnet4_48khz_hr_2out.onnx");
+        assert_eq!(ModelChoice::Auto.names()[1], "dpdfnet8_48khz_hr_2out.onnx");
+        assert_eq!(ModelChoice::Auto.names()[2], "dpdfnet2_48khz_hr_2out.onnx");
+        assert_eq!(ModelChoice::Auto.names()[4], "dpdfnet2_48khz_hr.onnx");
     }
 }

@@ -2650,6 +2650,18 @@ mod tests {
         render("panel-mono-save", s, false, false);
     }
 
+    /// 中間モデル (dp4) を選んでいるときの表示（OBS 版フッタ右の MODEL 刻印）。
+    #[test]
+    fn snapshot_panel_middle_model() {
+        let mut s = demo(1.0);
+        s.model = ModelChoice::Middle;
+        s.model_label = "MODEL DP4".into();
+        s.summary =
+            "2 ch  ·  48 kHz  ·  遅延 2880 samples (60 ms)  ·  dereverb あり  ·  model dp4"
+                .into();
+        render("panel-middle", s, false, false);
+    }
+
     /// MUTE / BYP が灯った状態（AMBIENCE をミュート、VOICE をバイパス）。
     #[test]
     fn snapshot_panel_modes() {

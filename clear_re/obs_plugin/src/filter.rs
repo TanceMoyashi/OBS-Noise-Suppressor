@@ -1031,7 +1031,7 @@ pub unsafe extern "C" fn get_properties(
         );
 
         // ---- モデル（ドロップダウン） ----
-        // 同梱しているのは dpdfnet8 と dpdfnet2 の 2 種だけなので選択肢は 3 つ。
+        // 同梱しているのは dpdfnet8 / dpdfnet4 / dpdfnet2 の 3 種なので選択肢は 4 つ。
         // 同梱されていない選択肢は disabled にして選べないようにする。
         let dirs = if data.is_null() {
             collect_resource_dirs()
@@ -1048,8 +1048,9 @@ pub unsafe extern "C" fn get_properties(
             crate::ffi::OBS_COMBO_FORMAT_STRING,
         );
         for (idx, (val, label)) in [
-            ("auto", "自動（高品質を優先）"),
+            ("auto", "自動（中間 dp4 を優先）"),
             ("dp8", "高品質 - dpdfnet8"),
+            ("dp4", "中間 - dpdfnet4"),
             ("dp2", "軽量 - dpdfnet2"),
         ]
         .iter()
@@ -1257,7 +1258,8 @@ pub unsafe extern "C" fn filter_audio(
 //
 // DPDFNet の推論は 1 ホップ = 480 サンプル (10 ms) ごとに走る。この 10 ms に
 // 間に合わないと OBS の音声スレッドが詰まり、音が途切れて「音が遅れる」ように
-// 見える。速い CPU でも高品質モデル (`dpdfnet8`) は 1 コアの 7 割を使うので、
+// 見える。既定の中間モデル (`dpdfnet4`) でも余裕は大きくなく、品質モデル
+// (`dpdfnet8`) は速い CPU でも 1 コアの 7 割を使うので、
 //
 //   * 起動前に「このマシンで回るか」を実測し、重ければ最初から軽量モデルで
 //     始める（`calibrate_and_maybe_downgrade`）
@@ -1462,12 +1464,14 @@ mod tests {
 
     #[test]
     fn fallback_needs_auto_model_and_a_light_model() {
-        use paths::ModelChoice::{Auto, Fast, Quality};
+        use paths::ModelChoice::{Auto, Fast, Middle, Quality};
 
         // 自動 + 未構築 + 軽量あり → 落としてよい。
         assert!(can_fallback_to_light(false, Auto, u8::MAX, true));
         // 高品質を明示指定している → 落とさない（警告だけ）。
         assert!(!can_fallback_to_light(false, Quality, u8::MAX, true));
+        // 中間を明示指定している → 落とさない（警告だけ）。
+        assert!(!can_fallback_to_light(false, Middle, u8::MAX, true));
         // 軽量を明示指定 → 落とす必要がない。
         assert!(!can_fallback_to_light(false, Fast, u8::MAX, true));
         // すでに軽量で動いている → 何もしない。
