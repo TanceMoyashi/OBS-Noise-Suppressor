@@ -119,7 +119,7 @@ def make_noise(kind: str, n: int, rng: np.random.Generator, pool: SpeechPool) ->
         y = 0.02 * rng.standard_normal(n).astype(np.float32)
         for _ in range(int(rng.integers(1, 4))):
             p = int(rng.integers(0, max(1, n - 480)))
-            ln = int(0.02 * SR)
+            ln = min(int(0.02 * SR), n - p)
             env = np.exp(-np.arange(ln) / (0.002 * SR))
             y[p:p + ln] += rng.uniform(0.2, 1.0) * env * rng.standard_normal(ln).astype(np.float32)
         return y
@@ -166,7 +166,7 @@ def build_batch(pool: SpeechPool, cache_len: int, batch: int, seg_len: int,
 # --------------------------------------------------------------------------- #
 # 損失
 # --------------------------------------------------------------------------- #
-def spectral_loss(est: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+def spectral_loss(est: torch.Tensor, ref: torch.Tensor, ri_weight: float = 1.0) -> torch.Tensor:
     """教師の spec_e に合わせる。振幅のべき乗圧縮 + 複素 MSE。"""
     e = est.float()
     r = ref.float()
@@ -174,7 +174,7 @@ def spectral_loss(est: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
     mag_r = (r[..., 0] ** 2 + r[..., 1] ** 2 + 1e-12).pow(0.15)
     l_mag = F.mse_loss(mag_e, mag_r)
     l_ri = F.mse_loss(e, r)
-    return l_mag + 0.25 * l_ri
+    return l_mag + ri_weight * l_ri
 
 
 # --------------------------------------------------------------------------- #
@@ -193,6 +193,8 @@ def main() -> int:
     ap.add_argument("--seg", type=float, default=4.0, help="1 サンプルの長さ (秒)")
     ap.add_argument("--batch", type=int, default=6)
     ap.add_argument("--lr", type=float, default=2e-4)
+    ap.add_argument("--ri-weight", type=float, default=1.0,
+                    help="複素 MSE の重み (0.3 乗圧縮した振幅 MSE に対する比率)")
     ap.add_argument("--steps", type=int, default=100000, help="総ステップ数 (打ち切り上限)")
     ap.add_argument("--minutes", type=float, default=40.0, help="1 回の実行の上限 (分)")
     ap.add_argument("--save-every", type=int, default=200)
@@ -256,37 +258,49 @@ def main() -> int:
 
     opt = torch.optim.Adam(student.parameters(), lr=args.lr, betas=(0.9, 0.98), eps=1e-8)
 
-    # 検証データ (固定)
+    # 検証データ (固定・3 本の平均を見る)
     val_n = int(args.val_seconds * SR)
-    v_idx = pool.any_longer(val_n)
     val_pool = SpeechPool.__new__(SpeechPool)   # 同じ pool を使う
     val_pool.raw, val_pool.lengths, val_pool.offsets = pool.raw, pool.lengths, pool.offsets
-    vrng = np.random.default_rng(999)
-    vx, _ = build_batch(val_pool, 0, 1, val_n, level_rms, vrng, rir_bank)
-    vx = vx[0]
-    with torch.no_grad():
-        vt_spec, _ = teacher(torch.from_numpy(vx)[None].to(device))
-        vt_spec = vt_spec.cpu().numpy()
+    val_sigs = []
+    for s in (999, 1000, 1001):
+        vrng = np.random.default_rng(s)
+        vxx, _ = build_batch(val_pool, 0, 1, val_n, level_rms, vrng, rir_bank)
+        val_sigs.append(vxx[0])
+    val_teacher = []
+    for vx in val_sigs:
+        with torch.no_grad():
+            vt, _ = teacher(torch.from_numpy(vx)[None].to(device))
+        val_teacher.append(vt.float().cpu().numpy())
+
+    def _flat(a: np.ndarray) -> np.ndarray:
+        while a.ndim > 3:
+            a = a[0]
+        return a
 
     def validate() -> dict:
         student.eval()
+        snrs = []
         with torch.no_grad():
-            vs, _ = student(torch.from_numpy(vx)[None].to(device))
-            vs = vs.float().cpu().numpy()
+            for vx, vt in zip(val_sigs, val_teacher):
+                vs, _ = student(torch.from_numpy(vx)[None].to(device))
+                snrs.append(complex_snr_db(_flat(vt), _flat(vs.float().cpu().numpy())))
         student.train()
-        se = vs[0]
-        while se.ndim > 3:
-            se = se[0]
-        tr = vt_spec[0]
-        while tr.ndim > 3:
-            tr = tr[0]
-        return {"val_spec_snr": complex_snr_db(tr, se)}
+        return {"val_spec_snr": float(np.mean(snrs)),
+                "val_spec_snr_each": [round(float(x), 2) for x in snrs]}
 
     start = time.time()
     deadline = start + args.minutes * 60
     step = 0
     best = -1e9
     hist: list[dict] = []
+    st_path = args.out.with_suffix(".state.json")
+    if args.resume and st_path.is_file():
+        prev = json.loads(st_path.read_text(encoding="utf-8"))
+        step = int(prev.get("steps", 0))
+        best = float(prev.get("best_val_spec_snr", -1e9))
+        hist = list(prev.get("hist", []))
+        print(f"[resume] 前回 step={step} best={best:.2f} dB")
     log_path = args.out.with_suffix(".log")
     args.out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -305,7 +319,7 @@ def main() -> int:
         with torch.no_grad():
             t_spec, _ = teacher(x)
         s_spec, _ = student(x)
-        loss = spectral_loss(s_spec, t_spec)
+        loss = spectral_loss(s_spec, t_spec, args.ri_weight)
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -320,7 +334,8 @@ def main() -> int:
 
         if args.val_every and step % args.val_every == 0:
             m = validate()
-            log(f"[val   {step:5d}] teacher との spec SNR = {m['val_spec_snr']:.2f} dB")
+            log(f"[val   {step:5d}] teacher との spec SNR = {m['val_spec_snr']:.2f} dB "
+                f"(各 {m['val_spec_snr_each']})")
             hist.append({"step": step, "val_spec_snr": m["val_spec_snr"],
                          "loss": loss.item()})
             if m["val_spec_snr"] > best:

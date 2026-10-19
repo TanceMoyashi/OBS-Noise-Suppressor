@@ -42,8 +42,12 @@ def main() -> int:
     ap.add_argument("--blocks", type=int, default=4)
     ap.add_argument("--out-dir", type=Path, default=None)
     ap.add_argument("--wav", type=Path, default=PLUGIN / "test_signals" / "speech_with_noise.wav")
-    ap.add_argument("--tensor-name", default="/model/mask/Mul_output_0",
-                    help="spec_ns に使う中間テンソル (tools/add_second_output.py --list で確認)")
+    ap.add_argument("--from-buffer", default="/model/df_op/spec_buffer/Concat_output_0",
+                    help="spec_ns に使う中間バッファ (既存 2 出力モデルと同じ取り方)")
+    ap.add_argument("--buffer-index", type=int, default=2,
+                    help="バッファの何フレーム目を出すか。DF の窓 5 の中央 (2) = 現在のフレーム")
+    ap.add_argument("--tensor-name", default=None,
+                    help="--from-buffer の代わりに中間テンソル名で指定する場合 (tools/add_second_output.py --list)")
     ap.add_argument("--skip-verify", action="store_true")
     args = ap.parse_args()
 
@@ -67,8 +71,13 @@ def main() -> int:
          "import onnx;from onnx import shape_inference as si;p=r'" + str(onnx_1out) + "';"
          "m=onnx.load(p);m=si.infer_shapes(m,strict_mode=False,data_prop=True);"
          "onnx.save(m,p);print('[OK] shape_inference')"])
-    run([sys.executable, "tools/add_second_output.py", "--model", onnx_1out,
-         "--tensor-name", args.tensor_name, "--out", onnx_2out])
+    add_cmd = [sys.executable, "tools/add_second_output.py", "--model", onnx_1out, "--out", onnx_2out]
+    if args.tensor_name:
+        add_cmd += ["--tensor-name", args.tensor_name]
+    else:
+        add_cmd += ["--from-buffer", args.from_buffer,
+                    "--buffer-index", str(args.buffer_index)]
+    run(add_cmd)
 
     if args.skip_verify:
         print(f"[ok ] {onnx_1out}\n[ok ] {onnx_2out}")
