@@ -220,6 +220,11 @@ pub const IDC_ARROW: usize = 32512;
 pub const SM_CXSCREEN: i32 = 0;
 pub const SM_CYSCREEN: i32 = 1;
 
+/// `GetModuleHandleExW` のフラグ。アドレスからモジュールを得て、参照カウントは
+/// 増やさない（DAW がプラグイン DLL をアンロードできるようにするため）。
+pub const GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT: u32 = 0x0002;
+pub const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: u32 = 0x0004;
+
 // メッセージ
 pub const WM_CREATE: u32 = 0x0001;
 pub const WM_DESTROY: u32 = 0x0002;
@@ -270,6 +275,11 @@ pub const CLEARTYPE_QUALITY: u32 = 5;
 #[link(name = "user32")]
 extern "system" {
     pub fn GetModuleHandleW(lpModuleName: *const u16) -> HMODULE;
+    pub fn GetModuleHandleExW(
+        dwFlags: u32,
+        lpModuleName: *const u16,
+        phModule: *mut HMODULE,
+    ) -> i32;
     pub fn RegisterClassW(lpWndClass: *const WNDCLASSW) -> u16;
     pub fn CreateWindowExW(
         dwExStyle: u32,

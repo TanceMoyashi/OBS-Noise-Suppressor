@@ -260,15 +260,33 @@ fn class_name() -> Vec<u16> {
     wide("DpdfnetPanel")
 }
 
+/// このコードが入っているモジュール（DLL / EXE）のハンドル。
+///
+/// ウィンドウクラスは**登録したモジュールがアンロードされると外れる**。
+/// VST3 は DAW がプラグイン DLL を出し入れするので、EXE ではなく DLL の
+/// ハンドルで登録する。EXE で登録すると、プラグインを外して入れ直したときに
+/// 「クラスが既にある」となってパネルを出せなくなる。
+fn module_handle() -> HINSTANCE {
+    let mut h = HINSTANCE::default();
+    let flags =
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+    unsafe {
+        if GetModuleHandleExW(flags, wndproc as *const () as *const u16, &mut h) == 0 {
+            h = GetModuleHandleW(std::ptr::null());
+        }
+    }
+    h
+}
+
 fn ensure_class() -> Result<u16, String> {
     if let Some(a) = CLASS.get() {
         return Ok(*a);
     }
 
     let name = class_name();
-    let hinst = unsafe { GetModuleHandleW(std::ptr::null()) };
+    let hinst = module_handle();
     if hinst.0.is_null() {
-        return Err("GetModuleHandleW に失敗".into());
+        return Err("GetModuleHandleExW に失敗".into());
     }
 
     let atom = unsafe {
