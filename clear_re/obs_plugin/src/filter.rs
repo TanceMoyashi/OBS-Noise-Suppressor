@@ -641,7 +641,7 @@ impl FilterData {
         if !crate::load::too_slow_at_start(avg_us, budget_us) {
             obs_log!(
                 crate::ffi::LOG_INFO,
-                "起動時の実測: {ms:.2} ms / 予算 {budget_ms:.2} ms ({pct:.0} %) — 品質モデルのまま開始します"
+                "起動時の実測: {ms:.2} ms / 予算 {budget_ms:.2} ms ({pct:.0} %) — 選択中のモデルのまま開始します"
             );
             return None;
         }
@@ -668,7 +668,7 @@ impl FilterData {
             Err(e) => {
                 obs_log!(
                     crate::ffi::LOG_WARNING,
-                    "軽量モデルに切り替えられませんでした（品質モデルのまま続けます）: {e}"
+                    "軽量モデルに切り替えられませんでした（選択中のモデルのまま続けます）: {e}"
                 );
                 None
             }

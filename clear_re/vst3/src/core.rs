@@ -196,7 +196,7 @@ impl Core {
             }
         };
 
-        // 起動時キャリブレーション。「自動」で品質モデルを組んだときだけ、
+        // 起動時キャリブレーション。「自動」で既定モデル (dp4) を組んだときだけ、
         // 実際に回して予算に収まるかを測る（検証用の env 指定は尊重する）。
         if model == ModelChoice::Auto && paths::env_model_file().is_none() {
             if let Some(light) = paths::find_model_choice(ModelChoice::Fast, &dirs) {
@@ -223,13 +223,13 @@ impl Core {
                             self.model = ModelChoice::Fast;
                         }
                         Err(e) => nih_warn!(
-                            "軽量モデルに切り替えられませんでした（品質モデルのまま続けます）: {e}"
+                            "軽量モデルに切り替えられませんでした（選択中のモデルのまま続けます）: {e}"
                         ),
                     }
                 } else {
                     nih_log!(
                         "起動時の実測: {ms:.2} ms / 予算 {budget_ms:.2} ms ({pct:.0} %) — \
-                         品質モデルのまま開始します"
+                         選択中のモデルのまま開始します"
                     );
                 }
             }

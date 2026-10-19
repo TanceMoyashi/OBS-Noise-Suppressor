@@ -705,6 +705,37 @@ GPU で回したダンプは `tools/compare_dumps.py` で CPU のダンプと突
 
 テスト本数は **obs_plugin 41 + dpdfnet 45 + vst3 8 = 94**（すべて成功、警告 0）。
 
+### v0.3.2 予定 追記（中間モデル dp4 の実機確認 / 2026-10-20）
+
+中間モデル `dpdfnet4_48khz_hr_2out.onnx`（DPRNN 4 ブロック、`state=67700`、2 出力）を
+追加し、**「自動」の既定を dp4 に切り替えた**。その実機確認。
+
+- モデル数: **5 個**（dp4 / dp8 / dp2 の 2 出力 + dp8 / dp2 の 1 出力）
+- 起動時キャリブレーション（`-Model auto`）:
+  `起動時の実測: 3.51 ms / 予算 10.00 ms (35 %) — 選択中のモデルのまま開始します`
+  → 既定の dp4 がそのまま選ばれ、dp2 へのフォールバックは起きない
+- 実行中の負荷（`-Model auto`、約 1 秒後）:
+  `音声処理の負荷: 1 ホップ平均 4.02 ms / 予算 10.00 ms (40 %)、最大 5.87 ms`
+  （dp8 の実測は平均 5.93 – 7.25 ms / 59 – 73 %。**dp4 は予算の 4 割で回る**）
+- 読み込まれたモデル（OBS 標準ログの status 行）:
+  `dev CPU / dpdfnet4_48khz_hr_2out.onnx | n_fft=960 hop=480 state=67700 outputs=2`
+- 遅延: **lag = 2880 samples (60.0 ms)**（in/out の相関でも一致）
+- オフライン参照との一致:
+  - `-Model dp4`: 434,176 frames × 2ch、**max diff = 0e0**
+  - `-Model auto`: 147,456 frames × 2ch、**max diff = 0e0**
+    （`auto` が dp4 を選び、その出力が dp4 のオフライン計算とビット一致することの確認）
+- テスト: **obs_plugin 18 + dpdfnet 46 + panel_ui 32 + vst3 9**（すべて成功、警告 0）
+- ログ文言の修正: 既定が dp8 でなくなったので、キャリブレーションの
+  「品質モデルのまま開始します」を **「選択中のモデルのまま開始します」** に変更
+  （OBS 版 / VST3 版とも）。
+
+```powershell
+# 既定（自動 = dp4）で測る
+.\tools\run_obs_verify.ps1 -WorkDir <dir> -Model auto
+# dp4 を明示して測る
+.\tools\run_obs_verify.ps1 -WorkDir <dir> -Model dp4
+```
+
 ## 7. ライセンス表示（GitHub の判定）
 
 GitHub は `LICENSE` を **licensee** で判定する。しきい値は「正規テキストとの語彙一致
