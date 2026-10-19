@@ -189,6 +189,7 @@ version = "0.3.0"
 dependencies = [
  "dpdfnet",
  "nih_plug",
+ "panel_ui",
 ]
 
 [[package]]
@@ -388,6 +389,13 @@ name = "ort-sys"
 version = "2.0.0-rc.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4af4763e553f916650b0bfe4b8d217d61c28607f6117e48b8ab5584d1138f22f"
+
+[[package]]
+name = "panel_ui"
+version = "0.3.1"
+dependencies = [
+ "dpdfnet",
+]
 
 [[package]]
 name = "parking_lot"

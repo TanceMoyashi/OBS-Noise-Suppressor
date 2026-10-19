@@ -86,26 +86,40 @@ if (-not $vcvars) {
 $cargo = Find-Cargo
 
 if ($Tests) {
-    $cargoArgs = @("test")
-    if ($Configuration -eq "Release") { $cargoArgs += "--release" }
-    $cargoArgs += @("--lib")
-    if ($TestFilter) { $cargoArgs += $TestFilter }
-    $cargoArgs += @("--")
-    if ($NoCapture) { $cargoArgs += "--nocapture" }
+    $targets = @($root)
+    # パネル UI は別クレート（OBS 版と共有）。テストはそちらにもある。
+    $panelRoot = Join-Path (Split-Path -Parent $root) "panel_ui"
+    if (Test-Path -LiteralPath (Join-Path $panelRoot "Cargo.toml")) {
+        $targets += $panelRoot
+    }
 } else {
-    $cargoArgs = @("build")
-    if ($Configuration -eq "Release") { $cargoArgs += "--release" }
+    $targets = @($root)
 }
 
-$cargoLine = ($cargoArgs | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join " "
-Write-Host "==> $cargo $cargoLine" -ForegroundColor Cyan
+foreach ($dir in $targets) {
+    if ($Tests) {
+        $cargoArgs = @("test")
+        if ($Configuration -eq "Release") { $cargoArgs += "--release" }
+        $cargoArgs += @("--lib")
+        if ($TestFilter) { $cargoArgs += $TestFilter }
+        $cargoArgs += @("--")
+        if ($NoCapture) { $cargoArgs += "--nocapture" }
+    } else {
+        $cargoArgs = @("build")
+        if ($Configuration -eq "Release") { $cargoArgs += "--release" }
+    }
 
-$cmd = "`"$vcvars`" >nul 2>&1 && cd /d `"$root`" && `"$cargo`" $cargoLine"
-& cmd.exe /c $cmd
-$code = $LASTEXITCODE
+    $cargoLine = ($cargoArgs | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join " "
+    Write-Host "==> $cargo $cargoLine" -ForegroundColor Cyan
+    Write-Host "    (in $dir)" -ForegroundColor DarkGray
 
-if ($code -ne 0) {
-    throw "cargo が失敗しました (exit $code)"
+    $cmd = "`"$vcvars`" >nul 2>&1 && cd /d `"$dir`" && `"$cargo`" $cargoLine"
+    & cmd.exe /c $cmd
+    $code = $LASTEXITCODE
+
+    if ($code -ne 0) {
+        throw "cargo が失敗しました (exit $code)"
+    }
 }
 
 if (-not $Tests) {

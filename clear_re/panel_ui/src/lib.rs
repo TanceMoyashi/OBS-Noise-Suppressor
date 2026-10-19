@@ -61,6 +61,13 @@ pub fn rate_label(rate: u32) -> String {
     }
 }
 
+/// パネルの論理サイズ（物理サイズ = これ × `Config::scale`）。
+///
+/// 子ウィンドウ（VST3）はホストにサイズを伝える必要があるので公開している。
+pub fn logical_size() -> (u32, u32) {
+    (draw::CLIENT_W as u32, draw::CLIENT_H as u32)
+}
+
 /// パネルが 1 ティック進める間隔 [ms]。`meter::TICK_MS` と一致させること。
 pub const TIMER_MS: u32 = 40;
 

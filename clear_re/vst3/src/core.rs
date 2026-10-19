@@ -10,7 +10,8 @@
 
 use std::path::PathBuf;
 use std::ptr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use nih_plug::{nih_error, nih_log, nih_warn};
 
@@ -24,6 +25,63 @@ const CALIBRATION_WARMUP_HOPS: usize = 2;
 /// 起動時キャリブレーションで測るホップ数（6 ホップ = 60 ms ぶんの推論）。
 const CALIBRATION_HOPS: usize = 6;
 
+/// エディタ（パネル）が読む表示用の共有状態。
+///
+/// **音声スレッドは触らない。** 書き込むのは `build`（非音声スレッド）だけで、
+/// パネルは 40 ms ごとに読むだけ。パラメータそのもの（つまみ / モデル /
+/// デバイス / バイパス）は `Arc<DpdfnetParams>` のアトミックから直接読むので、
+/// ここには「エンジンの状態」だけを置く。
+pub struct EditorShared {
+    /// エンジンのチャンネル数（0 = 未構築）。
+    pub channels: AtomicUsize,
+    /// エンジンが想定しているサンプルレート（0 = 未構築）。
+    pub rate: AtomicU32,
+    /// 2 出力モデル（dereverb あり）か。
+    pub dereverb: AtomicBool,
+    /// 0 = 正常（`panel_ui::STATUS_OK`）、非 0 = エラー / 未構築。LED の色に使う。
+    status: AtomicU32,
+    status_text: Mutex<String>,
+    summary: Mutex<String>,
+}
+
+impl EditorShared {
+    fn new() -> Self {
+        Self {
+            channels: AtomicUsize::new(0),
+            rate: AtomicU32::new(0),
+            dereverb: AtomicBool::new(false),
+            status: AtomicU32::new(1),
+            status_text: Mutex::new("初期化中".into()),
+            summary: Mutex::new(String::new()),
+        }
+    }
+
+    pub fn status(&self) -> u32 {
+        self.status.load(Ordering::Relaxed)
+    }
+
+    pub fn status_text(&self) -> String {
+        self.status_text.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    pub fn summary(&self) -> String {
+        self.summary.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    fn set_status(&self, status: u32, text: impl Into<String>) {
+        if let Ok(mut g) = self.status_text.lock() {
+            *g = text.into();
+        }
+        self.status.store(status, Ordering::Relaxed);
+    }
+
+    fn set_summary(&self, text: impl Into<String>) {
+        if let Ok(mut g) = self.summary.lock() {
+            *g = text.into();
+        }
+    }
+}
+
 pub struct Core {
     engine: Option<Engine>,
     /// 組み立てに使ったモデル / デバイス（設定が変わったかの判定に使う）。
@@ -32,6 +90,8 @@ pub struct Core {
     /// 最後の失敗理由。`None` なら正常。
     error: Option<String>,
     meters: Arc<Meters>,
+    /// エディタ（パネル）が読む表示用の状態。
+    shared: Arc<EditorShared>,
     /// モデル / ONNX Runtime の追加探索先（bundle の中を明示したいとき用）。
     extra_dirs: Vec<PathBuf>,
 }
@@ -50,12 +110,23 @@ impl Core {
             device: DeviceChoice::Cpu,
             error: None,
             meters: Arc::new(Meters::new()),
+            shared: Arc::new(EditorShared::new()),
             extra_dirs: Vec::new(),
         }
     }
 
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    /// エディタ（パネル）と共有するメーター。
+    pub fn meters(&self) -> Arc<Meters> {
+        Arc::clone(&self.meters)
+    }
+
+    /// エディタ（パネル）と共有する表示用の状態。
+    pub fn shared(&self) -> Arc<EditorShared> {
+        Arc::clone(&self.shared)
     }
 
     pub fn model(&self) -> ModelChoice {
@@ -77,10 +148,16 @@ impl Core {
         self.device = device;
         self.engine = None;
         self.error = None;
+        self.shared.channels.store(0, Ordering::Relaxed);
+        self.shared.dereverb.store(false, Ordering::Relaxed);
+        self.shared.rate.store(rate as u32, Ordering::Relaxed);
 
         let channels = channels.clamp(1, 2);
         if !dpdfnet::resample::supported(rate as u32) {
             self.error = Some(format!("未対応のサンプルレート: {rate} Hz"));
+            self.shared
+                .set_status(1, format!("未対応のサンプルレート: {} Hz", rate as u32));
+            self.shared.set_summary(String::new());
             return;
         }
 
@@ -96,6 +173,8 @@ impl Core {
                     .collect::<Vec<_>>()
                     .join(" / ")
             ));
+            self.shared.set_status(1, "モデルが見つかりません");
+            self.shared.set_summary(String::new());
             return;
         };
 
@@ -110,6 +189,9 @@ impl Core {
             Ok(e) => e,
             Err(e) => {
                 self.error = Some(format!("モデルの読み込みに失敗: {e}"));
+                self.shared
+                    .set_status(1, format!("モデルの読み込みに失敗: {e}"));
+                self.shared.set_summary(String::new());
                 return;
             }
         };
@@ -161,6 +243,35 @@ impl Core {
             eng.device.label(),
             eng.model_summary
         );
+
+        // パネル（エディタ）に出す状態を更新する。ステータス 1 行は OBS 版と
+        // 同じ形にして、下段に短い要約を出す。
+        let lat = eng.latency_samples;
+        let lat_ms = lat as f64 / dpdfnet::INTERNAL_SAMPLE_RATE as f64 * 1000.0;
+        let dev_label = eng.device.label();
+        self.shared.channels.store(channels, Ordering::Relaxed);
+        self.shared.rate.store(rate as u32, Ordering::Relaxed);
+        self.shared
+            .dereverb
+            .store(eng.dereverb_available, Ordering::Relaxed);
+        self.shared.set_status(
+            panel_ui::STATUS_OK,
+            format!(
+                "{} / ch={channels} / 遅延 {} samples ({lat_ms:.0} ms) / dev {} / {}",
+                panel_ui::rate_label(rate as u32),
+                lat,
+                dev_label,
+                eng.model_summary
+            ),
+        );
+        self.shared.set_summary(format!(
+            "{channels} ch  ·  {}  ·  遅延 {lat} samples ({lat_ms:.0} ms)  ·  dereverb {}  ·  model {}  ·  dev {}",
+            panel_ui::rate_label(rate as u32),
+            if eng.dereverb_available { "あり" } else { "なし" },
+            self.model.as_str(),
+            dev_label
+        ));
+
         self.engine = Some(eng);
     }
 

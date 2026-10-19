@@ -7,8 +7,10 @@
 //!   * `initialize` でエンジンを組み立て、遅延をホストに報告する
 //!   * `process` は `core::Core` に丸投げ（レート変換もコア側がやる）
 //!
-//! GUI はまだ無い（ホストの汎用パラメータ表示で操作する）。状態（プリセット）は
-//! nih-plug がパラメータ一覧から自動で保存するので、DAW 側のプリセットに乗る。
+//! GUI は OBS 版と同じ自前 Win32 パネル（共通クレート `panel_ui`）を子ウィンドウ
+//! として出す（`editor.rs`）。つまみ / ミュート / BYPASS / モデル / デバイス /
+//! メモリーをパネルから操作できる。状態（プリセット）は nih-plug がパラメータ
+//! 一覧から自動で保存するので、DAW 側のプリセットに乗る。
 
 // `nih_export_vst3!` が展開する vst3-sys 側のマクロが、式位置の末尾セミコロンで
 // 警告を出す（上流のマクロ由来。こちらのコードではない）。VST3 版だけの話なので
@@ -20,6 +22,7 @@ use std::sync::Arc;
 use nih_plug::prelude::*;
 
 mod core;
+mod editor;
 mod params;
 
 #[cfg(test)]
@@ -74,6 +77,17 @@ impl Plugin for DpdfnetVoice {
         self.params.clone()
     }
 
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        // パネル（自前 Win32 の子ウィンドウ）。描画・入力はホストの UI スレッドで
+        // 動き、音声スレッドからは触らない。メーターと表示用の状態は `Core` が
+        // 持つアトミック / ミューテックスを共有する。
+        Some(Box::new(editor::DpdfnetEditor::new(
+            Arc::clone(&self.params),
+            self.core.meters(),
+            self.core.shared(),
+        )))
+    }
+
     fn initialize(
         &mut self,
         layout: &AudioIOLayout,
@@ -113,6 +127,12 @@ impl Plugin for DpdfnetVoice {
         _aux: &mut AuxiliaryBuffers,
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
+        // パネルの BYPASS がオンなら何もせず素通しする。エンジンに流さないので
+        // メーターの通し番号が止まり、パネルの針は静止位置へ戻る。
+        if self.params.bypassed() {
+            return ProcessStatus::Normal;
+        }
+
         let frames = buffer.samples();
         let params = self.params.snapshot();
 

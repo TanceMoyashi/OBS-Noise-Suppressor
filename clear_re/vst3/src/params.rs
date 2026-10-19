@@ -41,6 +41,15 @@ impl FeatureKind {
             Self::Bypass => dsp::FeatureMode::Bypass,
         }
     }
+
+    /// パネル (`panel_ui`) から来た値を戻す。`to_dsp` の逆。
+    pub fn from_dsp(m: dsp::FeatureMode) -> Self {
+        match m {
+            dsp::FeatureMode::Active => Self::Active,
+            dsp::FeatureMode::Mute => Self::Mute,
+            dsp::FeatureMode::Bypass => Self::Bypass,
+        }
+    }
 }
 
 /// 使うモデル（OBS 版の `model` 設定と同じ 3 択）。
@@ -68,6 +77,15 @@ impl ModelKind {
             Self::Fast => ModelChoice::Fast,
         }
     }
+
+    /// パネル (`panel_ui`) の MODEL キーから来た値を戻す。`to_dsp` の逆。
+    pub fn from_dsp(c: ModelChoice) -> Self {
+        match c {
+            ModelChoice::Auto => Self::Auto,
+            ModelChoice::Quality => Self::Quality,
+            ModelChoice::Fast => Self::Fast,
+        }
+    }
 }
 
 /// 推論デバイス（GPU = DirectML。実測で CPU より遅いので既定は CPU）。
@@ -86,6 +104,14 @@ impl DeviceKind {
         match self {
             Self::Cpu => DeviceChoice::Cpu,
             Self::Gpu => DeviceChoice::Gpu,
+        }
+    }
+
+    /// パネル (`panel_ui`) の DEV キーから来た値を戻す。`to_dsp` の逆。
+    pub fn from_dsp(c: DeviceChoice) -> Self {
+        match c {
+            DeviceChoice::Cpu => Self::Cpu,
+            DeviceChoice::Gpu => Self::Gpu,
         }
     }
 }
@@ -131,6 +157,11 @@ pub struct DpdfnetParams {
     /// 推論デバイス。**自動化しない**（同上）。
     #[id = "inferenceDevice"]
     pub device: EnumParam<DeviceKind>,
+
+    /// 全体のバイパス。パネルの BYPASS キー。オンにすると何もせず素通しする
+    /// （自動化できる。他のパラメータと同じくホストの汎用表示からも変えられる）。
+    #[id = "bypass"]
+    pub bypass: BoolParam,
 }
 
 impl Default for DpdfnetParams {
@@ -177,6 +208,9 @@ impl Default for DpdfnetParams {
 
             model: EnumParam::new("Model", ModelKind::Auto).non_automatable(),
             device: EnumParam::new("Inference Device", DeviceKind::Cpu).non_automatable(),
+
+            // 既定は「有効」（= バイパスしない）。OBS 版のフィルタ有効と同じ。
+            bypass: BoolParam::new("Bypass", false),
         }
     }
 }
@@ -201,6 +235,11 @@ impl DpdfnetParams {
     pub fn device_choice(&self) -> DeviceChoice {
         self.device.value().to_dsp()
     }
+
+    /// バイパス中か（= 全体が無効）。
+    pub fn bypassed(&self) -> bool {
+        self.bypass.value()
+    }
 }
 
 #[cfg(test)]
@@ -221,6 +260,8 @@ mod tests {
         // 既定は「自動」「CPU」（OBS 版と同じ）。
         assert_eq!(p.model_choice(), ModelChoice::Auto);
         assert_eq!(p.device_choice(), DeviceChoice::Cpu);
+        // 既定はバイパスしない（= 有効）。
+        assert!(!p.bypassed());
     }
 
     #[test]
@@ -250,5 +291,18 @@ mod tests {
         }
         assert_eq!(DeviceKind::Cpu.to_dsp(), DeviceChoice::Cpu);
         assert_eq!(DeviceKind::Gpu.to_dsp(), DeviceChoice::Gpu);
+    }
+
+    #[test]
+    fn kinds_round_trip_through_dsp() {
+        for k in [FeatureKind::Active, FeatureKind::Mute, FeatureKind::Bypass] {
+            assert_eq!(FeatureKind::from_dsp(k.to_dsp()), k);
+        }
+        for k in [ModelKind::Auto, ModelKind::Quality, ModelKind::Fast] {
+            assert_eq!(ModelKind::from_dsp(k.to_dsp()), k);
+        }
+        for k in [DeviceKind::Cpu, DeviceKind::Gpu] {
+            assert_eq!(DeviceKind::from_dsp(k.to_dsp()), k);
+        }
     }
 }

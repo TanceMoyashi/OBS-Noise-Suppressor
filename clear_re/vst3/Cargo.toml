@@ -17,6 +17,11 @@ path = "src/lib.rs"
 # OBS 版とまったく同じ DSP コア（音声経路・遅延・パラメータの意味が共通）。
 dpdfnet = { path = "../dpdfnet" }
 
+# OBS 版と同じ自前 Win32 パネル（GDI + DIB）。ホスト非依存なので、こちらでは
+# 子ウィンドウとして載せる。Win32 / GDI は生 FFI で書いてある（`windows`
+# クレートに依存しない）。
+panel_ui = { path = "../panel_ui" }
+
 # nih-plug は crates.io に出ていないので git から取る。
 # rev を固定しているのは、VST3 SDK 側 (vst3-sys) も含めて再現できるようにするため。
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "de421011f41a6d10fc8c7a6084e4f4dee0143683" }
