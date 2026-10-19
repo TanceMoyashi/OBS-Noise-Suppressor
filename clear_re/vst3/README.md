@@ -41,7 +41,7 @@ DPDFNet Voice.vst3\Contents\x86_64-win\DPDFNet Voice.vst3   本体
 ```powershell
 cd clear_re\vst3
 .\build.ps1                      # cargo build --release
-.\build.ps1 -Tests               # cargo test --release --lib
+.\build.ps1 -Tests               # テスト（DSP + パネル UI）
 .\tools\make_package.ps1         # dist\ に配布パッケージと ZIP を作る
 .\tools\make_package.ps1 -WithGpu   # GPU (DirectML) の DLL も同梱する
 ```
@@ -64,11 +64,43 @@ cd clear_re\vst3
 | （各モード） | 有効 / ミュート / バイパス | つまみの位置は保ったまま効きだけ切る（OBS 版の MUTE / BYP と同じ） |
 | Model | 自動 / 高品質 (dp8) / 軽量 (dp2) | **自動化されない**設定 |
 | Inference Device | CPU / GPU (DirectML) | **自動化されない**設定。既定 CPU |
+| Bypass | オフ / オン | 全体のバイパス。オンにすると素通し（パネルの BYPASS キー） |
 
 `Model` と `Inference Device` は自動化に載せていません（音声スレッドで組み立て直す
 必要があり、オートメーションで頻繁に変わると破綻するため）。**変えたときは
 `process` の先頭で組み立て直すので、その一瞬だけ音が途切れます。** 状態は DAW の
 保存（プリセット）に乗ります。
+
+## GUI（パネル）
+
+OBS 版と**同じ自前 Win32 パネル**を、DAW が渡す親ウィンドウの子ウィンドウとして
+出します（共通クレート [`clear_re/panel_ui`](../panel_ui/)）。見た目・数値・操作は
+OBS 版と揃えてあります。
+
+```text
++--------------------------------------------------------------+
+| OBS NOISE SUPPRESSOR          MEMORY 1 2 3 4 5 6 7 8  SAVE  |
+|  IN (VU)      OUT (VU)      CONTROL          EFFECT          |
+|  [針 + 数値]  [針 + 数値]   AMBIENCE|VOICE|REVERB   GR + 3 バンド|
+|                              MUTE/BYP 付き                    |
+|  ● 48 kHz / ch=2 / ...        MODEL AUTO   DEV CPU   BYPASS   |
++--------------------------------------------------------------+
+```
+
+操作できるもの:
+
+| 場所 | 操作 |
+| --- | --- |
+| AMBIENCE / VOICE / REVERB | ドラッグ / ホイール / ダブルクリックで既定値へ。ホストの自動化にも乗ります |
+| MUTE / BYP | つまみの値は保ったまま効きだけ切る。同じキーをもう一度押すと戻る（排他） |
+| BYPASS | 全体の有効 / 無効。オフにすると素通しし、針は静止位置へ戻ります |
+| MODEL | 押すたびに 自動 → dp8 → dp2 → 自動（`Model` パラメータと同じ） |
+| DEV | 押すたびに CPU → GPU → CPU（`Inference Device` と同じ） |
+| MEMORY 1〜8 | 押すとその設定を呼び出す。`SAVE` を押してからスロットを押すと保存。`Ctrl` + クリックで消去 |
+| メーター | IN / OUT の VU とピーク、EFFECT の GR / 3 バンド。ダブルクリックでピークホールドを消す |
+
+メモリーの保存先は `%APPDATA%\DPDFNet Voice\presets.json` です（DAW のプロジェクト
+やホストのプリセットとは別。プラグインをまたいで使い回せます）。
 
 ## 遅延
 
@@ -124,8 +156,14 @@ DSP そのもの（遅延 2880 サンプル、モデルの読み込み、レー�
 
 ## 制限と注意
 
-- **GUI はまだありません。** 操作はホストの汎用パラメータ表示からになります。
-  パネルのような VU / フェーダー UI は今後の課題です。
+- パネルは**固定サイズ**です（リサイズできません）。倍率はホストが
+  `IPlugViewContentScaleSupport::set_scale_factor` で伝えてきた値に従います
+  （伝えてこないホストでは 1.0 のままなので、高 DPI では小さく見えることがあります）。
+- ホストによっては、子ウィンドウが他のウィンドウの後ろに隠れたり、DAW 側の
+  再描画の都合でパネルの更新が遅れることがあります（音には影響しません）。
+- MODEL / DEV はクリックで選択肢を巡回するキーです（ドロップダウンはありません）。
+- メモリー（1〜8）は DAW のプロジェクトではなく
+  `%APPDATA%\DPDFNet Voice\presets.json` に保存されます。
 - ログは DAW 側に出ます（`NIH_LOG=<ファイル>` でファイルへも出せます）。
 - `Model` を `GPU (DirectML)` にするには GPU 用の DLL が必要です。`-WithGpu` 付きで
   作ったパッケージなら同梱されています。**実測では GPU は CPU より遅い**です
@@ -137,9 +175,10 @@ DSP そのもの（遅延 2880 サンプル、モデルの読み込み、レー�
 
 | パス | 内容 |
 | --- | --- |
-| `src/lib.rs` | nih-plug の `Plugin` / `Vst3Plugin`（パラメータ → DSP、遅延の報告） |
+| `src/lib.rs` | nih-plug の `Plugin` / `Vst3Plugin`（パラメータ → DSP、遅延の報告、BYPASS） |
 | `src/params.rs` | パラメータ定義（OBS 版と同じ範囲・既定値・意味） |
 | `src/core.rs` | DSP の駆動（組み立て / レート / 遅延 / キャリブレーション）。ホスト無しでテストできる形 |
+| `src/editor.rs` | パネル（`panel_ui`）のホスト結線。子ウィンドウ / `ParamSetter` |
 | `src/offline_tests.rs` | オフライン検証（ブロックサイズ非依存など） |
 | `build.ps1` | vcvars → cargo |
 | `installer/install.ps1` / `uninstall.ps1` | 配布パッケージに入るインストーラ（BAT は起動だけ） |
