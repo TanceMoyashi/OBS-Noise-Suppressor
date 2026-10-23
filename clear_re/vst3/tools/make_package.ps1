@@ -132,6 +132,16 @@ foreach ($f in @("install.ps1", "install.bat", "uninstall.ps1", "uninstall.bat")
 }
 Copy-Item -LiteralPath $license -Destination (Join-Path $pack "LICENSE") -Force
 
+# DPDFNet モデルのライセンス / 帰属表示 (Apache-2.0 + 派生物)
+foreach ($n in @("LICENSE-DPDFNet.txt", "NOTICE-DPDFNet.txt")) {
+    $src = Join-Path $models $n
+    if (Test-Path -LiteralPath $src) {
+        Copy-Item -LiteralPath $src -Destination (Join-Path $pack $n) -Force
+    } else {
+        Write-Warning "モデルのライセンス表記が見つかりません: $src"
+    }
+}
+
 # --- README.txt（配布物の中に入る説明） ---
 $gpuNote = if ($WithGpu) {
     @"
@@ -224,8 +234,10 @@ $gpuNote
 
 ライセンス
 ----------
-GPL-2.0 (同梱の LICENSE)。DPDFNet のモデルと ONNX Runtime はそれぞれの
-ライセンスに従います。
+GPL-2.0 (同梱の LICENSE)。DPDFNet のモデルは Apache License 2.0
+(Ceva-IP の DPDFNet に由来) で、全文は同梱の LICENSE-DPDFNet.txt、
+帰属表示と改変内容は NOTICE-DPDFNet.txt にあります。ONNX Runtime は
+MIT License (Microsoft) です。
 "@
 [System.IO.File]::WriteAllText((Join-Path $pack "README.txt"), $readme,
     (New-Object System.Text.UTF8Encoding($true)))

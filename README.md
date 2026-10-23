@@ -113,7 +113,7 @@ OBS のプロパティにある **「パネルを開く（フェーダー / メ�
   内部で 48 kHz に変換して処理します。変換段を作れない異常値のときだけパススルー）
 - CPU 負荷は**品質モデル (`dpdfnet8`) でコア 1 本をほぼ使い切る**ため、既定の
   「自動」は品質と軽量の中間である**中間モデル (`dpdfnet4`)** を優先します
-  （負荷も品質と軽量の中間の見込み。**dp4 の実測はまだ取れていません**）。
+  （実機の実測で 1 ホップ平均 4.0 ms / 最大 5.9 ms = 予算の 40 % 前後、dp8 の約 6 割）。
   それでも足りないノート PC や古い CPU では**軽量モデル (`dpdfnet2`)** を選んで
   ください（負荷は約 1/3。実測値と自動切り替えの説明は [`clear_re/obs_plugin/README.md`](clear_re/obs_plugin/README.md#cpu-負荷の目安音が途切れる--遅れて聞こえるとき)）
 - GPU (DirectML) は**追加パック**（`OBS-Noise-Suppressor-<版>-gpu-pack.zip`）を
@@ -286,5 +286,10 @@ OBS 標準のログ（`%APPDATA%\obs-studio\logs\*.txt`）にも同じ内容が�
 - このリポジトリの自作コード: **GPL-2.0-or-later** — Copyright (C) 2026 TanceMoyashi。
   全文は [`LICENSE`](LICENSE)（GPL-2.0 の正規のテキストをそのまま置いています）
 - ONNX Runtime（`dpdfnet_onnxruntime.dll`）: MIT License（Microsoft）
-- DPDFNet モデル（`*.onnx`）: 同梱モデルのライセンスに従います
+- DPDFNet モデル（`*.onnx`）: **Apache License 2.0**（[Ceva-IP / DPDFNet](https://github.com/ceva-ip/DPDFNet) に由来）。
+  全文は [`clear_re/plugin/models/LICENSE-DPDFNet.txt`](clear_re/plugin/models/LICENSE-DPDFNet.txt)、
+  帰属表示と改変内容は [`NOTICE-DPDFNet.txt`](clear_re/plugin/models/NOTICE-DPDFNet.txt)。
+  同梱する中間モデル `dpdfnet4_48khz_hr_2out.onnx` は **dp8 からの改変物**（DPRNN 8 → 4 ブロック、
+  蒸留で微調整、2 出力化）で、LibriSpeech と MUSAN（いずれも CC BY 4.0）を使って学習しています
+  （詳細は [`MODEL_TRAINING.md`](clear_re/plugin/MODEL_TRAINING.md) §9）
 - 旧 VST3 版の `clear_re/plugin/third_party/kissfft`: 同フォルダの `COPYING` を参照

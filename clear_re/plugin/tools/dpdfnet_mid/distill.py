@@ -6,6 +6,8 @@
   * 教師 = DPDFNet dp8 (同じオフライン実装)
   * 損失 = 教師の `spec_e` との一致 (振幅のべき乗圧縮 MSE + 複素 MSE)
     -> プラグインが出すのは結局 `spec_e` なので、そこを直接合わせる。
+  * オプションでクリーン音声を参照にした波形損失を足せる (`--mr-weight` /
+    `--sisdr-weight`)。既定は 0 で従来と同じ。MODEL_TRAINING.md §8.3-3。
 
 データ:
   * prepare_data.py が作った LibriSpeech (48 kHz) の memmap からランダム窓
@@ -178,11 +180,12 @@ def build_batch(pool: SpeechPool, cache_len: int, batch: int, seg_len: int,
                 level_rms: float, rng: np.random.Generator,
                 rir_bank: list[np.ndarray],
                 noise_pool: "NoisePool | None" = None,
-                real_p: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
-    """(ノイズ入り入力, クリーン入力) のバッチを作る。どちらもレベルを揃える。"""
+                real_p: float = 0.0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(ノイズ入り入力, 入力レベル, クリーン入力) のバッチを作る。レベルは揃えてある。"""
     n = seg_len * batch
     idx = pool.any_longer(seg_len)
     xs = np.zeros((batch, seg_len), np.float32)
+    cs = np.zeros((batch, seg_len), np.float32)
     clean_db = []
     for b in range(batch):
         i = int(rng.choice(idx))
@@ -206,8 +209,9 @@ def build_batch(pool: SpeechPool, cache_len: int, batch: int, seg_len: int,
         gn = np.sqrt(np.mean(s ** 2)) / (np.sqrt(np.mean(nz ** 2)) + 1e-12) * 10 ** (-target_snr / 20)
         x = s + gn * nz
         xs[b] = x
+        cs[b] = s
         clean_db.append(20 * np.log10(np.sqrt(np.mean(x ** 2)) + 1e-12))
-    return xs, np.asarray(clean_db, np.float32)
+    return xs, np.asarray(clean_db, np.float32), cs
 
 
 # --------------------------------------------------------------------------- #
@@ -222,6 +226,47 @@ def spectral_loss(est: torch.Tensor, ref: torch.Tensor, ri_weight: float = 1.0) 
     l_mag = F.mse_loss(mag_e, mag_r)
     l_ri = F.mse_loss(e, r)
     return l_mag + ri_weight * l_ri
+
+
+# --------------------------------------------------------------------------- #
+# 知覚寄りの損失 (先生との一致だけでなく、クリーン音声に近づける)
+# --------------------------------------------------------------------------- #
+# 蒸留の検証値 (teacher との spec SNR) は上がるのに PESQ / STOI が横ばいだったので、
+# クリーン音声を参照にした波形側の損失を足せるようにした。既定は重み 0 で従来と同一。
+def mr_stft_loss(est: torch.Tensor, ref: torch.Tensor,
+                 ffts: tuple[int, ...] = (512, 1024, 2048), hop_ratio: float = 0.25) -> torch.Tensor:
+    """マルチ解像度 STFT 損失 (対数振幅 L1 + スペクトル収束)。
+
+    est / ref: (B, samples) の波形。窓長を変えて数えたものを平均する。
+    """
+    total = est.new_zeros(())
+    used = 0
+    for n_fft in ffts:
+        if n_fft > 2 * est.shape[-1]:
+            continue
+        win = torch.hann_window(n_fft, device=est.device, dtype=est.dtype)
+        hop = max(1, int(n_fft * hop_ratio))
+        e = torch.stft(est, n_fft=n_fft, hop_length=hop, win_length=n_fft, window=win,
+                       center=True, return_complex=True).abs().clamp_min(1e-7)
+        r = torch.stft(ref, n_fft=n_fft, hop_length=hop, win_length=n_fft, window=win,
+                       center=True, return_complex=True).abs().clamp_min(1e-7)
+        l_log = F.l1_loss(torch.log(e), torch.log(r))
+        l_sc = (torch.linalg.vector_norm((e - r).reshape(e.shape[0], -1), dim=-1)
+                / (torch.linalg.vector_norm(r.reshape(r.shape[0], -1), dim=-1) + 1e-7)).mean()
+        total = total + l_log + l_sc
+        used += 1
+    return total / max(used, 1)
+
+
+def si_sdr_loss(est: torch.Tensor, ref: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """負の SI-SDR (スケール不変)。est / ref: (B, samples)。"""
+    est = est - est.mean(dim=-1, keepdim=True)
+    ref = ref - ref.mean(dim=-1, keepdim=True)
+    a = (est * ref).sum(dim=-1, keepdim=True) / ((ref * ref).sum(dim=-1, keepdim=True) + eps)
+    proj = a * ref
+    noise = est - proj
+    ratio = (proj ** 2).sum(dim=-1) / ((noise ** 2).sum(dim=-1) + eps)
+    return -(10.0 * torch.log10(ratio + eps)).mean()
 
 
 # --------------------------------------------------------------------------- #
@@ -242,6 +287,12 @@ def main() -> int:
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--ri-weight", type=float, default=1.0,
                     help="複素 MSE の重み (0.3 乗圧縮した振幅 MSE に対する比率)")
+    ap.add_argument("--mr-weight", type=float, default=0.0,
+                    help="マルチ解像度 STFT 損失の重み (クリーン音声を参照。0 で無効)")
+    ap.add_argument("--sisdr-weight", type=float, default=0.0,
+                    help="SI-SDR 損失の重み (クリーン音声を参照。0 で無効)")
+    ap.add_argument("--select", default="auto", choices=["auto", "spec", "sisdr"],
+                    help="best チェックポイントを選ぶ指標 (auto = 波形損失があれば sisdr)")
     ap.add_argument("--steps", type=int, default=100000, help="総ステップ数 (打ち切り上限)")
     ap.add_argument("--minutes", type=float, default=40.0, help="1 回の実行の上限 (分)")
     ap.add_argument("--save-every", type=int, default=200)
@@ -317,11 +368,13 @@ def main() -> int:
     val_pool = SpeechPool.__new__(SpeechPool)   # 同じ pool を使う
     val_pool.raw, val_pool.lengths, val_pool.offsets = pool.raw, pool.lengths, pool.offsets
     val_sigs = []
+    val_cleans = []
     for s in (999, 1000, 1001):
         vrng = np.random.default_rng(s)
-        vxx, _ = build_batch(val_pool, 0, 1, val_n, level_rms, vrng, rir_bank,
-                            noise_pool, args.real_noise_p)
+        vxx, _, vcc = build_batch(val_pool, 0, 1, val_n, level_rms, vrng, rir_bank,
+                             noise_pool, args.real_noise_p)
         val_sigs.append(vxx[0])
+        val_cleans.append(vcc[0])
     val_teacher = []
     for vx in val_sigs:
         with torch.no_grad():
@@ -336,13 +389,21 @@ def main() -> int:
     def validate() -> dict:
         student.eval()
         snrs = []
+        sisdrs = []
         with torch.no_grad():
-            for vx, vt in zip(val_sigs, val_teacher):
+            for vx, vt, vc in zip(val_sigs, val_teacher, val_cleans):
                 vs, _ = student(torch.from_numpy(vx)[None].to(device))
                 snrs.append(complex_snr_db(_flat(vt), _flat(vs.float().cpu().numpy())))
+                # クリーン音声に対する SI-SDR (波形損失を入れたときの選択指標)
+                sa = student.base.apply_istft(vs.squeeze(1))
+                c = torch.from_numpy(vc)[None].to(device)
+                n = min(sa.shape[-1], c.shape[-1])
+                sisdrs.append(-si_sdr_loss(sa[..., :n], c[..., :n]).item())
         student.train()
         return {"val_spec_snr": float(np.mean(snrs)),
-                "val_spec_snr_each": [round(float(x), 2) for x in snrs]}
+                "val_spec_snr_each": [round(float(x), 2) for x in snrs],
+                "val_sisdr": float(np.mean(sisdrs)),
+                "val_sisdr_each": [round(float(x), 2) for x in sisdrs]}
 
     start = time.time()
     deadline = start + args.minutes * 60
@@ -365,17 +426,42 @@ def main() -> int:
             f.write(msg + "\n")
 
     log(f"=== start {time.strftime('%Y-%m-%d %H:%M:%S')} lr={args.lr} batch={args.batch} "
-        f"seg={args.seg} minutes={args.minutes}")
+        f"seg={args.seg} minutes={args.minutes} "
+        f"mr={args.mr_weight} sisdr={args.sisdr_weight}")
+
+    use_wave_loss = args.mr_weight > 0 or args.sisdr_weight > 0
+    select_metric = args.select
+    if select_metric == "auto":
+        select_metric = "sisdr" if use_wave_loss else "spec"
+    log(f"=== select = {select_metric}")
 
     while step < args.steps and time.time() < deadline:
-        xs, lv = build_batch(pool, 0, args.batch, seg_len, level_rms, rng, rir_bank,
-                             noise_pool, args.real_noise_p)
+        xs, lv, cs = build_batch(pool, 0, args.batch, seg_len, level_rms, rng, rir_bank,
+                                 noise_pool, args.real_noise_p)
         x = torch.from_numpy(xs).to(device)
 
         with torch.no_grad():
             t_spec, _ = teacher(x)
         s_spec, _ = student(x)
         loss = spectral_loss(s_spec, t_spec, args.ri_weight)
+        parts = ""
+
+        # クリーン音声を参照にした波形側の損失 (知覚指標を狙う)
+        if use_wave_loss:
+            # SpecModel の出力は [B, 1, T, F, 2]。istft は [B, T, F, 2] を取る。
+            s_spec4 = s_spec.squeeze(1) if s_spec.dim() == 5 else s_spec
+            s_aud = student.base.apply_istft(s_spec4)
+            c = torch.from_numpy(cs).to(device)
+            n = min(s_aud.shape[-1], c.shape[-1])
+            s_aud, c = s_aud[..., :n], c[..., :n]
+            if args.mr_weight > 0:
+                l_mr = mr_stft_loss(s_aud, c)
+                loss = loss + args.mr_weight * l_mr
+                parts += f"  mr={l_mr.item():.4f}"
+            if args.sisdr_weight > 0:
+                l_si = si_sdr_loss(s_aud, c)
+                loss = loss + args.sisdr_weight * l_si
+                parts += f"  sisdr={-l_si.item():.2f} dB"
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -385,19 +471,22 @@ def main() -> int:
 
         if step % 20 == 0:
             el = time.time() - start
-            log(f"[step {step:5d}] loss={loss.item():.5f}  level={lv.mean():.1f} dB  "
+            log(f"[step {step:5d}] loss={loss.item():.5f}  level={lv.mean():.1f} dB{parts}  "
                 f"{el/60:.1f} min  {step/(el+1e-9):.2f} step/s")
 
         if args.val_every and step % args.val_every == 0:
             m = validate()
             log(f"[val   {step:5d}] teacher との spec SNR = {m['val_spec_snr']:.2f} dB "
-                f"(各 {m['val_spec_snr_each']})")
+                f"(各 {m['val_spec_snr_each']}) / クリーンとの SI-SDR = {m['val_sisdr']:.2f} dB "
+                f"(各 {m['val_sisdr_each']})")
             hist.append({"step": step, "val_spec_snr": m["val_spec_snr"],
-                         "loss": loss.item()})
-            if m["val_spec_snr"] > best:
-                best = m["val_spec_snr"]
+                         "val_sisdr": m["val_sisdr"], "loss": loss.item()})
+            score = m["val_sisdr"] if select_metric == "sisdr" else m["val_spec_snr"]
+            if score > best:
+                best = score
                 torch.save(student.base.state_dict(), str(args.out.with_suffix(".best.pth")))
-                log(f"[best ] {args.out.with_suffix('.best.pth')} (SNR {best:.2f} dB)")
+                log(f"[best ] {args.out.with_suffix('.best.pth')} "
+                    f"({select_metric} {best:.2f} dB)")
 
         if args.save_every and step % args.save_every == 0:
             torch.save(student.base.state_dict(), str(args.out))
@@ -405,8 +494,10 @@ def main() -> int:
 
     torch.save(student.base.state_dict(), str(args.out))
     meta = {"steps": step, "minutes": (time.time() - start) / 60, "best_val_spec_snr": best,
+            "select": select_metric,
             "lr": args.lr, "batch": args.batch, "seg": args.seg, "blocks": args.blocks,
-            "hist": hist}
+            "mr_weight": args.mr_weight, "sisdr_weight": args.sisdr_weight,
+            "real_noise_p": args.real_noise_p, "hist": hist}
     args.out.with_suffix(".state.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     log(f"=== stop  {time.strftime('%Y-%m-%d %H:%M:%S')} step={step} "

@@ -1,0 +1,56 @@
+DPDFNet モデルの帰属表示 / Attribution notice for the DPDFNet models
+====================================================================
+
+このフォルダの ONNX モデルのうち、次の 4 本は上流の DPDFNet 配布物そのものです。
+
+    dpdfnet2_48khz_hr.onnx
+    dpdfnet2_48khz_hr_2out.onnx
+    dpdfnet8_48khz_hr.onnx
+    dpdfnet8_48khz_hr_2out.onnx
+
+    DPDFNet
+    Copyright (c) Ceva-IP
+    https://github.com/ceva-ip/DPDFNet
+    https://huggingface.co/Ceva-IP/DPDFNet
+    Licensed under the Apache License, Version 2.0.
+
+`dpdfnet2_48khz_hr_2out.onnx` と `dpdfnet8_48khz_hr_2out.onnx` は、上流の 1 出力
+モデルに 2 出力目 (残響抑圧用) を追加して再エクスポートしたものです
+(重みは変更していません。手順は clear_re/plugin/tools/add_second_output.py)。
+
+
+派生モデル: dpdfnet4_48khz_hr_2out.onnx
+---------------------------------------
+`dpdfnet4_48khz_hr_2out.onnx` (中間モデル / 4 DPRNN ブロック) は、上記 dp8 の重みから
+作った **改変物 (derivative work)** です。Apache License 2.0 の第 4 条に従い、
+変更内容を次に記載します。
+
+    Based on DPDFNet by Ceva-IP (Apache License 2.0).
+    Modified by TanceMoyashi, 2026:
+      * DPRNN ブロックを 8 から 4 に削減 (ブロック 0〜3 と共有部を dp8 からコピー)
+      * dp8 の spec_e を教師とする蒸留で微調整
+      * 2 出力目 (残響抑圧用) を追加して再エクスポート
+      * 学習時に実環境ノイズ (MUSAN) を混合
+
+学習・評価に使ったデータ (モデルの再配布時はこの表示も残してください):
+
+    LibriSpeech (dev-clean)
+      Panayotov, Chen, Povey, Khudanpur, 2015
+      CC BY 4.0 - http://www.openslr.org/12
+    MUSAN (noise subset)
+      Snyder, Chen, Povey, 2015
+      CC BY 4.0 - http://www.openslr.org/17/
+      MUSAN includes clips from freesound.org and soundbible.com;
+      per-clip attributions are listed in the MUSAN distribution.
+    LibriSpeech test-clean (評価のみ)
+      CC BY 4.0 - http://www.openslr.org/12
+
+ライセンス全文は同梱の LICENSE-DPDFNet.txt (Apache License 2.0) を参照してください。
+作成手順と実測値は clear_re/plugin/MODEL_TRAINING.md にあります。
+
+
+ONNX Runtime
+------------
+`dpdfnet_onnxruntime.dll` / `dpdfnet_onnxruntime_dml.dll` は Microsoft の
+ONNX Runtime で、MIT License です。DirectML.dll は Microsoft のライセンスに
+従います。

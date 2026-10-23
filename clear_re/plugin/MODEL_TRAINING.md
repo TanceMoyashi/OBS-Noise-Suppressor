@@ -28,8 +28,9 @@
 **統計的に有意な差は出ない**（§7.10.3）。実ノイズを学習に足す前は
 SI-SDR 4.19 / STOI 0.916 / PESQ 2.10 だったので、**分布のミスマッチはほぼ解消した**。
 
-**残タスク**: 実装上の残りはプラグイン側のモデル一覧への追加（別担当）と、
-配布時のライセンス表記。品質をさらに上げるなら §8.3。
+**残タスク**: 配布時のライセンス表記は対応済み（`models/LICENSE-DPDFNet.txt` と
+`models/NOTICE-DPDFNet.txt` を追加し、配布 `README.txt` とトップの README から参照）。
+品質をさらに上げるなら §8.3。
 
 ---
 
@@ -665,6 +666,26 @@ SI-SDR −0.30 ± 0.24 dB / STOI +0.001 / PESQ −0.005 で**ほぼ同じ**（�
 同じ `u*_<SNR>dB` の 5 本を並べれば、入力 → dp2 → dp4 → dp8 の順に聴き比べられる。
 いずれも `build/` の中なので**コミットしていない**（§8.1）。
 
+#### 7.11 知覚寄りの損失での微調整（2026-10-23・実験）
+
+§8.3-3 の案を実装して試した。従来の損失は**教師 (dp8) の `spec_e` との一致**だけ
+だったので、**クリーン音声を参照**にした波形側の損失を足せるようにした。
+
+* `distill.py` に `--mr-weight`（マルチ解像度 STFT: 対数振幅 L1 + スペクトル収束、
+  窓長 512 / 1024 / 2048）と `--sisdr-weight`（SI-SDR）を追加。既定は 0 で従来と同一。
+* `build_batch()` がクリーン波形も返すようにした（ノイズ・残響・レベルは入力と共通）。
+* best チェックポイントの選択も `--select sisdr` で「クリーンとの SI-SDR」に変更できる
+  （既定 `auto` = 波形損失があれば sisdr、無ければ従来の教師 SNR）。
+* 学習条件: 初期値 `dp4b.best.pth`、lr 5e-5、batch 4、3 秒、`--mr-weight 0.05`
+  `--sisdr-weight 0.01`、40 分。
+
+結果は下の表に追記する（学習・評価が終わってから）。
+
+| モデル | 教師との spec SNR | クリーンとの SI-SDR | STOI | PESQ |
+|---|---|---|---|---|
+| dp4b（従来） | 17.81 dB | — | — | — |
+| dp4p（知覚損失） | 記入待ち | 記入待ち | 記入待ち | 記入待ち |
+
 ---
 
 ## 8. 付録: 再現手順と、次にやること
@@ -674,6 +695,8 @@ SI-SDR −0.30 ± 0.24 dB / STOI +0.001 / PESQ −0.005 で**ほぼ同じ**（�
 | もの | 場所 | git |
 |---|---|---|
 | **新モデル (2 出力 ONNX)** | `clear_re/plugin/models/dpdfnet4_48khz_hr_2out.onnx` (12,044,747 B) | **未追跡**（大きいので意図的にコミットしない。追加する場合は LFS かリリース添付） |
+| **新モデルのライセンス全文 (Apache-2.0)** | `clear_re/plugin/models/LICENSE-DPDFNet.txt` | **コミットする**（配布物にも同梱） |
+| **新モデルの帰属表示 (改変内容 + 学習データ)** | `clear_re/plugin/models/NOTICE-DPDFNet.txt` | **コミットする**（配布物にも同梱） |
 | 1 出力 ONNX（2 出力化の元） | `clear_re/plugin/build/dpdfnet_train/onnx/dpdfnet4_48khz_hr.onnx` | 追跡しない（`build/` は .gitignore） |
 | 学習済み重み（最終） | `clear_re/plugin/build/dpdfnet_train/ckpt_mid/dp4b.best.pth` | 追跡しない |
 | 学習済み重み（実ノイズ導入前の旧版） | `clear_re/plugin/build/dpdfnet_train/ckpt_mid/dp4.best.pth` | 追跡しない（比較用に残してある） |
@@ -779,7 +802,10 @@ python tools/dpdfnet_mid/perceptual_report.py `
 * 実 RIR の多様性（今回は `rir_48k.wav` 1 本 + 合成 3 本 + 初期反射）。
 * プラグイン (`clear_re/dpdfnet`) のオフラインテストを新モデルに向けた実行
   （別担当が編集中のため今回は触っていない）。手順は §8.2-7。
-* 既定モデルを dp4 にするかどうかの決定（§7.10.3 の結論は「切り替える理由は薄い」）。
+
+**対応済み**: 配布時のライセンス表記（`models/LICENSE-DPDFNet.txt` /
+`models/NOTICE-DPDFNet.txt` を追加し、配布パッケージの `README.txt` から参照）、
+プラグイン側のモデル一覧への追加と既定 dp4 への切り替え、dp4 の実機確認。
 
 ### 8.5 使った道具の一覧
 
@@ -792,7 +818,7 @@ python tools/dpdfnet_mid/perceptual_report.py `
 | `tools/dpdfnet_mid/build_mid.py` | dp4 の初期値を作る |
 | `tools/dpdfnet_mid/prepare_data.py` | LibriSpeech の取得と 48 kHz キャッシュ作成（`--dataset test-clean` で評価用） |
 | `tools/dpdfnet_mid/prepare_noise.py` | MUSAN noise の取得・48 kHz 化・学習/評価 split |
-| `tools/dpdfnet_mid/distill.py` | 蒸留学習（45 分区切り・再開可・実ノイズ mix） |
+| `tools/dpdfnet_mid/distill.py` | 蒸留学習（45 分区切り・再開可・実ノイズ mix・クリーン参照の波形損失） |
 | `tools/dpdfnet_mid/export_mid.py` | ONNX 書き出し → 2 出力化 → 契約検証 |
 | `tools/dpdfnet_mid/evaluate_mid.py` | teacher との一致度と聴き比べ WAV（オフライン torch 版） |
 | `tools/dpdfnet_mid/quality_report.py` | 付属 WAV + 合成ノイズで 3 モデル比較（ONNX 版） |

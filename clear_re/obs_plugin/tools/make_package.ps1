@@ -204,7 +204,7 @@ New-Item -ItemType Directory -Force -Path $pkg | Out-Null
 
 # --- bin / data は install.ps1 に作らせる ---
 & (Join-Path $root "install.ps1") -Dest $pkg -Configuration $Configuration `
-    -SkipBuild:$SkipBuild -SkipModels:$SkipModels
+    -Version $version -SkipBuild:$SkipBuild -SkipModels:$SkipModels -Force
 
 # --- 安全確認: 梱包した DLL がこのバージョンで作られているか ---
 # `build.ps1 -Tests` はテスト用の lib だけを作り、cdylib (この DLL) は作り直さない。
@@ -244,6 +244,19 @@ if (Test-Path -LiteralPath $licenseSrc) {
     Copy-Item -LiteralPath $licenseSrc -Destination (Join-Path $pkg "LICENSE") -Force
 } else {
     Write-Warning "LICENSE が見つかりません: $licenseSrc"
+}
+
+# --- DPDFNet モデルのライセンス / 帰属表示 ---
+# モデルは Apache-2.0 (Ceva-IP の DPDFNet 由来 + 派生物) なので、全文と帰属表示を
+# パッケージ直下に置く。models\ の中に置くと install.ps1 のコピー対象から外れる。
+$modelDir = Join-Path $repo "plugin\models"
+foreach ($n in @("LICENSE-DPDFNet.txt", "NOTICE-DPDFNet.txt")) {
+    $src = Join-Path $modelDir $n
+    if (Test-Path -LiteralPath $src) {
+        Copy-Item -LiteralPath $src -Destination (Join-Path $pkg $n) -Force
+    } else {
+        Write-Warning "モデルのライセンス表記が見つかりません: $src"
+    }
 }
 
 # --- README.txt (UTF-8 BOM + CRLF。メモ帳で開く) ---
@@ -355,7 +368,11 @@ uninstall.bat をダブルクリックして y を押します。
   Copyright (C) 2026 TanceMoyashi
   全文は同梱の LICENSE を参照してください。
 * ONNX Runtime (dpdfnet_onnxruntime.dll): MIT License (Microsoft)
-* DPDFNet モデル (*.onnx): 同梱モデルのライセンスに従います
+* DPDFNet モデル (*.onnx): Apache License 2.0
+  Ceva-IP の DPDFNet (https://github.com/ceva-ip/DPDFNet) に由来します。
+  全文は同梱の LICENSE-DPDFNet.txt、帰属表示と改変内容は NOTICE-DPDFNet.txt。
+  中間モデル dpdfnet4_48khz_hr_2out.onnx は dp8 からの改変物で、
+  LibriSpeech と MUSAN (いずれも CC BY 4.0) を使って学習しています。
 
 詳しくはリポジトリの clear_re\obs_plugin\README.md を参照してください。
 "@

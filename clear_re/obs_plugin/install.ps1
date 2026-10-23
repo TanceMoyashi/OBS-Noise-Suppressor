@@ -85,6 +85,7 @@ param(
     [ValidateSet("Debug", "Release")][string]$Configuration = "Release",
     [string]$OrtDll = "",
     [string]$ModelSource = "",
+    [string]$Version = "",
     [string[]]$Obs = @(),
     [switch]$SkipBuild,
     [switch]$SkipModels,
@@ -101,6 +102,20 @@ $LegacyName = "dpdfnet_voice"
 $AppName = "OBS Noise Suppressor"
 $root = $PSScriptRoot
 $repo = Split-Path -Parent $root
+
+# manifest.json に書くバージョン。配布パッケージ作成側 (make_package.ps1) が
+# -Version で渡す。単体で実行したときは隣の Cargo.toml から読む
+# (以前はここに直書きしていて、上げ忘れると manifest だけ古い版になった)。
+$pluginVersion = $Version
+if (-not $pluginVersion) {
+    $cargoToml = Join-Path $root "Cargo.toml"
+    if (Test-Path -LiteralPath $cargoToml) {
+        $m = Select-String -LiteralPath $cargoToml -Pattern '^\s*version\s*=\s*"([^"]+)"' |
+            Select-Object -First 1
+        if ($m) { $pluginVersion = $m.Matches[0].Groups[1].Value }
+    }
+}
+if (-not $pluginVersion) { $pluginVersion = "0.0.0" }
 
 function Write-Head([string]$t) { Write-Host ""; Write-Host "== $t" -ForegroundColor Cyan }
 function Write-Ok([string]$t) { Write-Host "   [OK] $t" -ForegroundColor Green }
@@ -462,7 +477,7 @@ if ($Packaged) {
         id               = "obs-noise-suppressor"
         name             = $ModuleName
         display_name     = $AppName
-        version          = "0.3.0"
+        version          = $pluginVersion
         os_arch          = "win64"
         description      = "Neural speech enhancement (denoise / dereverb) audio filter"
         long_description = "OBS Noise Suppressor - OBS native audio filter (Rust). ONNX Runtime based neural noise suppression and dereverberation (DPDFNet models) for microphone sources. Any sample rate (44.1-192 kHz; resampled to 48 kHz internally), 6-hop (2880 sample = 60 ms) algorithmic latency at 48 kHz."
