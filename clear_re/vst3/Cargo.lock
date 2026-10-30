@@ -176,7 +176,7 @@ checksum = "9e9de72ce2ad1f90dc62fa25f0f430ef85eb4b0d8fa0be4f30373bc40a21d28e"
 
 [[package]]
 name = "dpdfnet"
-version = "0.3.0"
+version = "0.3.2"
 dependencies = [
  "ort-sys",
  "realfft",
@@ -392,7 +392,7 @@ checksum = "4af4763e553f916650b0bfe4b8d217d61c28607f6117e48b8ab5584d1138f22f"
 
 [[package]]
 name = "panel_ui"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "dpdfnet",
 ]
