@@ -346,7 +346,7 @@ DPDFNet の推論は **1 ホップ = 480 サンプル（48 kHz で 10 ms）ご�
 | 中間 `dpdfnet4`（自動で選ばれる方） | オフライン 2.6 ms / 実機 平均 3.6 ms・最大 5.2 ms（起動時実測 3.0 ms） | **36 %** |
 | 軽量 `dpdfnet2` | 約 2.1 ms | 約 21 % |
 
-中間 `dpdfnet4` は品質と軽量の中間で、実機では**予算の 36 % 前後**（dp8 の約 6 割）です。
+中間 `dpdfnet4` は品質と軽量の中間で、実機では**予算の 36 % 前後**（dp8 の半分前後）です。
 品質は 32 条件の平均（LibriSpeech test-clean × MUSAN eval split、学習に未使用）で
 **SI-SDR 3.89 dB / STOI 0.944 / PESQ-WB 2.59**（dp2 比 SI-SDR +1.83 dB）。
 ただし評価ノイズは MUSAN の eval split（学習と別ファイルだが同じコーパス）で、
