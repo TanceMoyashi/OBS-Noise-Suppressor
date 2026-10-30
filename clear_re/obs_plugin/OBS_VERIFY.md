@@ -736,6 +736,27 @@ GPU で回したダンプは `tools/compare_dumps.py` で CPU のダンプと突
 .\tools\run_obs_verify.ps1 -WorkDir <dir> -Model dp4
 ```
 
+### v0.3.2 追記 2（知覚損失で微調整した dp4q の実機確認 / 2026-10-30）
+
+`dpdfnet4_48khz_hr_2out.onnx` を、知覚寄りの損失で微調整した最終版（`dp4q`、
+12,044,747 B、`state=67700`、2 出力）に差し替えた。契約検証（`spec_e` / `state_out` の
+ビット一致、`spec_ns` の lag 0）は PASS。実機確認（`-Model auto`）:
+
+- 起動時キャリブレーション: **3.02 ms / 予算 10.00 ms (30 %)** — dp2 へ落ちない
+- 実行中の負荷（約 1 秒後）: **1 ホップ平均 3.61 ms / 予算 10.00 ms (36 %)、最大 5.19 ms**
+- 読み込まれたモデル: `dpdfnet4_48khz_hr_2out.onnx | state=67700 | outputs=2`
+- 遅延: **lag = 2880 samples (60.0 ms)**
+- オフライン参照との一致: **1,097,088 frames × 2ch、max diff = 0e0**
+- オフライン速度（`tools/bench_model.py`、ステレオ 1 ホップ）:
+  **dp2 1.74 ms / dp4 2.62 ms / dp8 4.77 ms**
+- テスト: **obs_plugin 18 + dpdfnet 46 + panel_ui 32 + vst3 9**（すべて成功、警告 0）
+
+品質（`MODEL_TRAINING.md` §7.11、32 条件の平均、LibriSpeech test-clean × MUSAN
+eval split）は **SI-SDR 3.89 dB / STOI 0.944 / PESQ-WB 2.59**。dp2（2.06 / 0.944 /
+2.49）比で SI-SDR **+1.83 dB**、dp8（2.15 / 0.948 / 2.53）比で **+1.74 dB**。
+留保: 評価ノイズは MUSAN の eval split（学習と別ファイルだが同じコーパス）で、
+**8 kHz 超の帯域と実マイク録音は未評価**。
+
 ## 7. ライセンス表示（GitHub の判定）
 
 GitHub は `LICENSE` を **licensee** で判定する。しきい値は「正規テキストとの語彙一致
