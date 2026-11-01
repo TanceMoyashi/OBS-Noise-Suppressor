@@ -3,6 +3,8 @@
 このリポジトリの開発・配布・GitHub 管理を引き継ぐための資料です。
 最終更新: 2026-11-01 / 対象: `main` = `00b3968`（v0.3.2 リリース済み）
 
+PDF 版: `docs/HANDOVER.pdf`（`python docs/make_handover_pdf.py` で再生成。Chrome か Edge が必要）
+
 ---
 
 ## 0. これは何か
